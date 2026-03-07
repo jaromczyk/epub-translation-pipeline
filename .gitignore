@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local secrets and environment
+.env
+.env.*
+
+# Translation workspaces and generated artifacts
+projects/
+translation_memory/
+translation_work/
+*.jsonl
+
+# Input/output books and local cover assets
+*.epub
+*.png
+*.jpg
+*.jpeg
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
