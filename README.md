@@ -1,56 +1,74 @@
 # EPUB Translation Pipeline
 
-Python tool for translating EPUB books safely while preserving XHTML structure, links, IDs, notes, and packaging.
+`tools/epub_translate.py` translates EPUB books while preserving XHTML structure, links, notes, and packaging.
 
-The repository contains the tool and documentation only. Book files, generated projects, translation workspaces, and local assets are intentionally excluded from version control.
+The repository is intentionally small. It contains the tool, prompt templates, tests, and docs. Generated book projects, source EPUBs, batch outputs, and local assets stay out of version control.
 
-## What It Does
+## Highlights
 
-- unpacks EPUB files
-- finds content XHTML/HTML files in reading order
-- translates only visible reader-facing text
-- preserves tags, attributes, anchors, links, and EPUB structure
-- translates paragraph-scale blocks while preserving inline structure via placeholders
-- splits long chapters into smaller chunks
-- saves progress so translation can be resumed
-- rebuilds translated EPUB output
-- supports OpenAI direct mode and Batch API workflows
-- supports lightweight cloud QA as a separate batch
-- can suggest per-book glossary candidates from the source EPUB
+- source-language aware project config
+- external prompt templates in [`prompts/`](/c:/code/bardeche/prompts)
+- resumable draft translation via direct mode or Batch API
+- local validation, remediation manifests, and targeted retry flow
+- explicit `finalize` command to rebuild the output EPUB
 
-## Main Files
+## Happy Path
 
-- `tools/epub_translate.py`
-- `MANUAL.md`
+1. Create a project:
 
-## Typical Workflow
+```powershell
+python tools\epub_translate.py init-project --epub "book.epub" --project-root projects --source-language fr --target-language en
+```
 
-1. Initialize a project from an EPUB.
-2. Configure model and translation options.
-3. Run a test chapter or full batch.
-4. Download and apply results.
-5. Run local cleanup and QA.
-6. Optionally run cloud QA as a diagnostic pass.
+2. Configure the model:
 
-See `MANUAL.md` for commands and examples.
+```powershell
+python tools\epub_translate.py configure-openai --project my-book-en --project-root projects --model gpt-5.4 --reasoning-effort none --use-batch
+```
+
+3. Run the draft translation:
+
+```powershell
+python tools\epub_translate.py draft --project my-book-en --project-root projects
+```
+
+4. Run cheap local review:
+
+```powershell
+python tools\epub_translate.py review --project my-book-en --project-root projects
+```
+
+5. If needed, use the remediation commands:
+
+- `build-remediation-plan`
+- `apply-local-fixes`
+- `retry-targeted`
+- `qa-changed`
+- `final-gate`
+
+6. Build the final EPUB:
+
+```powershell
+python tools\epub_translate.py finalize --project my-book-en --project-root projects
+```
+
+## Repository Layout
+
+- [`tools/epub_translate.py`](/c:/code/bardeche/tools/epub_translate.py)
+- [`prompts/translation_system.txt`](/c:/code/bardeche/prompts/translation_system.txt)
+- [`prompts/translation_user.txt`](/c:/code/bardeche/prompts/translation_user.txt)
+- [`prompts/qa_system.txt`](/c:/code/bardeche/prompts/qa_system.txt)
+- [`prompts/qa_user.txt`](/c:/code/bardeche/prompts/qa_user.txt)
+- [`MANUAL.md`](/c:/code/bardeche/MANUAL.md)
+- [`tests/test_epub_translate.py`](/c:/code/bardeche/tests/test_epub_translate.py)
 
 ## Requirements
 
 - Python 3.11+
-- `OPENAI_API_KEY` set in the shell
+- `OPENAI_API_KEY` in the shell
 
-## Suggested Repository Scope
+## Tests
 
-Keep only:
-
-- the script
-- documentation
-- future helper modules/tests if added
-
-Do not commit:
-
-- EPUB books
-- generated `projects/`
-- translation caches
-- batch outputs
-- local cover assets
+```powershell
+python -m unittest discover -s tests
+```

@@ -1,0 +1,24 @@
+Translate like a professional literary translator of historical and political essays.
+Preserve meaning with high fidelity and produce natural, elegant book $language_name.
+
+Style requirements:
+- preserve the author's serious, analytical, essayistic tone,
+- do not simplify arguments or compress the reasoning,
+- preserve rhetoric and the structure of the argument,
+- prefer literary, bookish phrasing over colloquial wording,
+- keep longer sentences where they remain natural in $language_name,
+- do not soften controversial or sharp formulations,
+- do not add commentary or interpretation,
+- preserve quotations, footnotes, headings, and emphasis,
+- preserve proper names, institutions, historical events, and legal terminology consistently.
+
+Quality requirements:
+- do not leave stray $source_language_name words untranslated unless they are clearly being cited as $source_language_name or are standard in $language_name,
+- do not produce hybrid phrases such as half-translated idioms or unexplained source-language calques,
+- do not leave culturally marked $source_language_name common nouns untranslated unless the context clearly requires retention,
+- when a literal rendering sounds awkward in $language_name, choose an idiomatic literary equivalent that preserves meaning and tone,
+- avoid duplicated determiners, duplicated words, or broken syntax,
+- if a foreign or italicized expression is intentionally retained, integrate it grammatically into the target sentence,
+- do not produce doubled forms such as a retained foreign word immediately followed by a redundant translated gloss of the same word,
+- preserve existing italics and emphasis semantically; translate the emphasized words unless they are titles or fixed foreign expressions,
+- keep political and historical terminology consistent across the book.

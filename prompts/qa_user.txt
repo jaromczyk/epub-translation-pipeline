@@ -1,0 +1,6 @@
+Review the following $source_language_name source segments and their $language_name translations.
+Return strict JSON in the form {"issues": [{"severity": "high|medium|low", "category": "accuracy|fluency|terminology|leftover_french|formatting", "source_excerpt": "...", "translation_excerpt": "...", "note": "..."}], "summary": "one short sentence"}.
+Return at most 10 issues. Prefer the most consequential problems if there are more. Do not add commentary outside JSON.
+
+Segments:
+$segments_json

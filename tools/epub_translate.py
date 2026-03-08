@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from string import Template
 from typing import Dict, Iterable, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
@@ -67,6 +68,7 @@ PRICE_TABLE = {
 }
 LANGUAGE_NAMES = {
     "en": "English",
+    "fr": "French",
     "pl": "Polish",
 }
 FRENCH_STOPWORDS = {
@@ -111,40 +113,95 @@ FRENCH_STOPWORDS = {
     "vos",
     "vous",
 }
+STRUCTURAL_TRANSLATIONS = {
+    "pl": {
+        "Sommaire": "Spis treści",
+        "Couverture": "Okładka",
+        "Page de titre": "Strona tytułowa",
+        "Début du texte": "Początek tekstu",
+        "Ensemble des notes de pied de page": "Zbiór wszystkich przypisów dolnych",
+        "Points de repère": "Punkty orientacyjne",
+        "Pages": "Strony",
+        "Notes": "Przypisy",
+        "Achevé de numériser": "Zakończono skanowanie",
+        "Copyright d’origine": "Oryginalna nota copyrightowa",
+    },
+    "en": {
+        "Sommaire": "Table of contents",
+        "Couverture": "Cover",
+        "Page de titre": "Title page",
+        "Début du texte": "Start of text",
+        "Ensemble des notes de pied de page": "All footnotes",
+        "Points de repère": "Landmarks",
+        "Pages": "Pages",
+        "Notes": "Notes",
+        "Achevé de numériser": "Digitization completed",
+        "Copyright d’origine": "Original copyright notice",
+    },
+}
+SOURCE_LANGUAGE_PROFILES = {
+    "fr": {
+        "markers": FRENCH_MARKERS,
+        "stopwords": FRENCH_STOPWORDS,
+        "structural_translations": STRUCTURAL_TRANSLATIONS,
+    },
+}
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+PROMPT_CACHE: Dict[str, str] = {}
+PIPELINE_DEFAULTS = {
+    "quality_gate": {"max_high": 0},
+    "api_budget_usd": 1.0,
+    "targeted_retry_max_chunks": 5,
+    "targeted_retry_reasoning_effort": "low",
+    "draft_reasoning_effort": None,
+    "qa_reasoning_effort": None,
+}
 
 
-def target_language_name(code: str) -> str:
-    normalized = (code or "en").split("-", 1)[0].lower()
+def normalize_language_code(code: Optional[str], default: str = "en") -> str:
+    return (code or default).split("-", 1)[0].lower()
+
+
+def language_name(code: Optional[str], default: str = "en") -> str:
+    normalized = normalize_language_code(code, default=default)
     return LANGUAGE_NAMES.get(normalized, normalized)
 
 
-def build_system_prompt(target_language: str) -> str:
-    language_name = target_language_name(target_language)
-    return f"""Translate like a professional literary translator of historical and political essays.
-Preserve meaning with high fidelity and produce natural, elegant book {language_name}.
+def target_language_name(code: str) -> str:
+    return language_name(code, default="en")
 
-Style requirements:
-- preserve the author's serious, analytical, essayistic tone,
-- do not simplify arguments or compress the reasoning,
-- preserve rhetoric and the structure of the argument,
-- prefer literary, bookish phrasing over colloquial wording,
-- keep longer sentences where they remain natural in {language_name},
-- do not soften controversial or sharp formulations,
-- do not add commentary or interpretation,
-- preserve quotations, footnotes, headings, and emphasis,
-- preserve proper names, institutions, historical events, and legal terminology consistently.
 
-Quality requirements:
-- do not leave French words untranslated unless they are clearly being cited as French or are standard in {language_name},
-- do not produce hybrid phrases such as half-translated idioms or unexplained gallicisms,
-- do not leave culturally marked French common nouns such as food names, slang, or metaphoric expressions untranslated unless the context clearly requires retention,
-- when a literal rendering sounds awkward in {language_name}, choose an idiomatic literary equivalent that preserves meaning and tone,
-- avoid duplicated determiners, duplicated words, or broken syntax,
-- if a foreign or italicized expression is intentionally retained, integrate it grammatically into the target sentence,
-- do not produce doubled forms such as a retained foreign word immediately followed by a redundant translated gloss of the same word,
-- preserve existing italics and emphasis semantically; translate the emphasized words unless they are titles or fixed foreign expressions,
-- keep political and historical terminology consistent across the book.
-"""
+def source_language_name(code: Optional[str]) -> str:
+    return language_name(code, default="fr")
+
+
+def source_language_profile(source_language: Optional[str]) -> Dict:
+    return SOURCE_LANGUAGE_PROFILES.get(normalize_language_code(source_language, default="fr"), {})
+
+
+def load_prompt_template(name: str) -> str:
+    cached = PROMPT_CACHE.get(name)
+    if cached is not None:
+        return cached
+    path = PROMPTS_DIR / name
+    if not path.exists():
+        raise RuntimeError(f"Prompt template not found: {path}")
+    template = path.read_text(encoding="utf-8")
+    PROMPT_CACHE[name] = template
+    return template
+
+
+def render_prompt_template(name: str, **values: str) -> str:
+    normalized = {key: ("" if value is None else str(value)) for key, value in values.items()}
+    return Template(load_prompt_template(name)).substitute(normalized)
+
+
+def build_system_prompt(target_language: str, source_language: Optional[str] = None) -> str:
+    return render_prompt_template(
+        "translation_system.txt",
+        language_name=target_language_name(target_language),
+        source_language_name=source_language_name(source_language),
+    )
 
 
 @dataclass
@@ -250,8 +307,12 @@ def project_paths(project_dir: Path, target_language: Optional[str] = None) -> D
         "glossary": project_dir / "glossary.md",
         "glossary_suggestions": project_dir / "glossary_suggestions.md",
         "qa": project_dir / "QA.md",
+        "qa_local": project_dir / "QA_local.md",
         "qa_cloud": project_dir / "QA_cloud.md",
+        "qa_changed": project_dir / "QA_changed.md",
         "qa_cloud_history": project_dir / "QA_cloud_history",
+        "qa_index": project_dir / "qa_index.json",
+        "remediation_plan": project_dir / "remediation_plan.json",
         "iterations_dir": project_dir / "iterations",
         "iteration_log": project_dir / "iterations" / "history.jsonl",
         "progress": workspace / "progress.json",
@@ -268,7 +329,12 @@ def project_paths(project_dir: Path, target_language: Optional[str] = None) -> D
     }
 
 
-def default_project_config(epub_path: Path, project_dir: Path, target_language: str = "en") -> Dict:
+def default_project_config(
+    epub_path: Path,
+    project_dir: Path,
+    target_language: str = "en",
+    source_language: str = "fr",
+) -> Dict:
     paths = project_paths(project_dir, target_language=target_language)
     return {
         "book": {
@@ -277,6 +343,7 @@ def default_project_config(epub_path: Path, project_dir: Path, target_language: 
             "output_epub": str(paths["output_epub"].resolve()),
         },
         "translation": {
+            "source_language": source_language,
             "target_language": target_language,
             "max_chars_per_chunk": 3200,
             "preserve_visible_text_only": True,
@@ -289,8 +356,9 @@ def default_project_config(epub_path: Path, project_dir: Path, target_language: 
             "model": None,
             "temperature": 0.2,
             "send_temperature": True,
-            "reasoning_effort": "medium",
+            "reasoning_effort": None,
         },
+        "pipeline": dict(PIPELINE_DEFAULTS),
         "paths": {
             "glossary": str(paths["glossary"].resolve()),
             "qa": str(paths["qa"].resolve()),
@@ -302,12 +370,17 @@ def default_project_config(epub_path: Path, project_dir: Path, target_language: 
     }
 
 
-def write_default_glossary(glossary_path: Path, target_language: str = "en") -> None:
+def write_default_glossary(
+    glossary_path: Path,
+    target_language: str = "en",
+    source_language: str = "fr",
+) -> None:
     if glossary_path.exists():
         return
     language_name = target_language_name(target_language)
+    source_name = source_language_name(source_language)
     glossary_path.write_text(
-        f"# Glossary\n\n| French | {language_name} |\n| --- | --- |\n",
+        f"# Glossary\n\nSource language: {source_name}\n\n| Source | {language_name} |\n| --- | --- |\n",
         encoding="utf-8",
     )
 
@@ -322,7 +395,28 @@ def read_project_config(project_dir: Path) -> Dict:
     config_path = project_paths(project_dir)["config"]
     if not config_path.exists():
         raise RuntimeError(f"Project config not found: {config_path}")
-    return load_json(config_path, {})
+    config = load_json(config_path, {})
+    config.setdefault("translation", {})
+    config["translation"].setdefault("source_language", "fr")
+    config["translation"].setdefault("target_language", "en")
+    config["translation"].setdefault("max_chars_per_chunk", 3200)
+    config["translation"].setdefault("preserve_visible_text_only", True)
+    config["translation"].setdefault("run_qa_after_apply", True)
+    config.setdefault("openai", {})
+    config["openai"].setdefault("endpoint", "/v1/responses")
+    config["openai"].setdefault("use_batch_api", True)
+    config["openai"].setdefault("completion_window", "24h")
+    config["openai"].setdefault("temperature", 0.2)
+    config["openai"].setdefault("send_temperature", True)
+    config["openai"].setdefault("reasoning_effort", None)
+    config.setdefault("pipeline", {})
+    config["pipeline"].setdefault("quality_gate", {})
+    config["pipeline"]["quality_gate"].setdefault("max_high", PIPELINE_DEFAULTS["quality_gate"]["max_high"])
+    for key, value in PIPELINE_DEFAULTS.items():
+        if key == "quality_gate":
+            continue
+        config["pipeline"].setdefault(key, value)
+    return config
 
 
 def save_project_config(project_dir: Path, config: Dict) -> None:
@@ -449,7 +543,8 @@ def build_unit_source_text(targets: List[TextTarget]) -> str:
 
 
 def build_unit_plain_text(targets: List[TextTarget]) -> str:
-    return normalize_space("".join(target.original_text for target in targets))
+    parts = [normalize_space(target.original_text) for target in targets if normalize_space(target.original_text)]
+    return normalize_space(" ".join(parts))
 
 
 def collect_targets_for_block(
@@ -573,7 +668,125 @@ def assign_translations(tree: ET.ElementTree, translated: Dict[Tuple[str, str], 
 
 
 def render_unit_translation(unit: TextUnit, translated_lookup: Dict[Tuple[str, str], str]) -> str:
-    return normalize_space("".join(translated_lookup.get((target.xpath, target.field), "") for target in unit.targets))
+    parts = [
+        normalize_space(translated_lookup.get((target.xpath, target.field), ""))
+        for target in unit.targets
+        if normalize_space(translated_lookup.get((target.xpath, target.field), ""))
+    ]
+    return normalize_space(" ".join(parts))
+
+
+def render_unit_translation_with_placeholders(
+    unit: TextUnit,
+    translated_lookup: Dict[Tuple[str, str], str],
+) -> str:
+    parts: List[str] = []
+    for index, target in enumerate(unit.targets):
+        parts.append(translated_lookup.get((target.xpath, target.field), ""))
+        if index < len(unit.targets) - 1:
+            parts.append(segment_placeholder(index + 1))
+    return "".join(parts)
+
+
+def structural_translation(source_text: str, source_language: Optional[str], target_language: str) -> Optional[str]:
+    normalized = normalize_space(source_text).replace("\xa0", " ")
+    language = normalize_language_code(target_language, default="en")
+    mapping = source_language_profile(source_language).get("structural_translations", {}).get(language, {})
+    if normalized in mapping:
+        return mapping[normalized]
+    page_match = re.fullmatch(r"Page\s+(\d+)", normalized)
+    if page_match:
+        if language == "pl":
+            return f"Strona {page_match.group(1)}"
+        if language == "en":
+            return f"Page {page_match.group(1)}"
+    return None
+
+
+def extract_number_tokens(text: str) -> List[str]:
+    return re.findall(r"\b\d{1,4}\b", text)
+
+
+def has_obvious_number_mismatch(source_text: str, translation_text: str) -> bool:
+    source_numbers = extract_number_tokens(source_text)
+    translation_numbers = extract_number_tokens(translation_text)
+    return bool(source_numbers and translation_numbers and source_numbers != translation_numbers)
+
+
+def replace_number_tokens_from_source(source_text: str, translation_text: str) -> str:
+    source_numbers = extract_number_tokens(source_text)
+    translation_numbers = extract_number_tokens(translation_text)
+    if not source_numbers or len(source_numbers) != len(translation_numbers):
+        return translation_text
+    iterator = iter(source_numbers)
+    return re.sub(r"\b\d{1,4}\b", lambda _: next(iterator), translation_text, count=len(source_numbers))
+
+
+def normalize_spacing_artifacts(text: str) -> str:
+    fixed = text
+    fixed = re.sub(r"\s+([,.;:!?])", r"\1", fixed)
+    fixed = re.sub(r"([(\[„])\s+", r"\1", fixed)
+    fixed = re.sub(r"\s+([)\]”])", r"\1", fixed)
+    fixed = re.sub(r" {2,}", " ", fixed)
+    return fixed
+
+
+def normalize_matching_text(text: str) -> str:
+    normalized = text.replace("\xa0", " ")
+    normalized = re.sub(r"\[\[SEG_\d+\]\]", " ", normalized)
+    normalized = normalize_space(normalized)
+    normalized = re.sub(r"(\d)\s+er\b", r"\1er", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\b([IVXLCDM]+)\s+e\b", r"\1e", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
+    return normalized
+
+
+def extract_note_suggestions(note: str) -> List[str]:
+    suggestions: List[str] = []
+    for pattern in (
+        r'"([^"]+)"',
+        r"'([^']+)'",
+        r"„([^”]+)”",
+        r"“([^”]+)”",
+        r"«([^»]+)»",
+    ):
+        suggestions.extend(normalize_space(match) for match in re.findall(pattern, note or ""))
+    deduped: List[str] = []
+    for item in suggestions:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def issue_matches_unit(issue: Dict[str, str], unit: TextUnit, translation_text: str) -> bool:
+    source_excerpt = normalize_matching_text(issue.get("source_excerpt", ""))
+    translation_excerpt = normalize_matching_text(issue.get("translation_excerpt", ""))
+    source_candidates = {normalize_matching_text(unit.plain_text), normalize_matching_text(unit.text)}
+    translation_candidate = normalize_matching_text(translation_text)
+    if source_excerpt and any(source_excerpt in candidate for candidate in source_candidates if candidate):
+        return True
+    if translation_excerpt and translation_excerpt in translation_candidate:
+        return True
+    return not source_excerpt and not translation_excerpt
+
+
+def reasoned_effort_for_mode(config: Dict, mode: str) -> Optional[str]:
+    pipeline = config.get("pipeline", {})
+    if mode == "draft":
+        return pipeline.get("draft_reasoning_effort")
+    if mode == "targeted_retry":
+        return pipeline.get("targeted_retry_reasoning_effort")
+    if mode == "qa":
+        return pipeline.get("qa_reasoning_effort")
+    return config.get("openai", {}).get("reasoning_effort")
+
+
+def should_use_qa_feedback(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "reuse_qa_feedback", False)
+        or getattr(args, "retry_only_high", False)
+        or getattr(args, "qa_snapshot", None)
+    )
 
 
 def load_glossary(glossary_path: Path) -> Dict[str, str]:
@@ -581,15 +794,21 @@ def load_glossary(glossary_path: Path) -> Dict[str, str]:
     if not glossary_path.exists():
         return glossary
     for line in glossary_path.read_text(encoding="utf-8").splitlines():
-        if "|" not in line or line.startswith("| French"):
+        if "|" not in line:
             continue
         parts = [part.strip() for part in line.strip("|").split("|")]
-        if len(parts) >= 2 and parts[0] and parts[1]:
-            glossary[parts[0]] = parts[1]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        if set(parts[0]) == {"-"} or set(parts[1]) == {"-"}:
+            continue
+        if parts[0].casefold().startswith("source") or parts[0].casefold() == "french":
+            continue
+        glossary[parts[0]] = parts[1]
     return glossary
 
 
-def extract_inline_glossary_candidates(tree: ET.ElementTree) -> List[str]:
+def extract_inline_glossary_candidates(tree: ET.ElementTree, source_language: Optional[str] = None) -> List[str]:
+    stopwords = source_language_profile(source_language).get("stopwords", set())
     root = tree.getroot()
     body = root.find(".//xhtml:body", NS)
     if body is None:
@@ -615,13 +834,14 @@ def extract_named_entity_candidates(text: str) -> List[str]:
         words = re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’-]*", phrase)
         if not words:
             continue
-        if len(words) == 1 and words[0].lower() in FRENCH_STOPWORDS:
+        if stopwords and len(words) == 1 and words[0].lower() in stopwords:
             continue
         candidates.append(phrase)
     return candidates
 
 
-def extract_repeated_term_candidates(text: str) -> List[str]:
+def extract_repeated_term_candidates(text: str, source_language: Optional[str] = None) -> List[str]:
+    stopwords = source_language_profile(source_language).get("stopwords", set())
     words = re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’-]*", text)
     candidates: List[str] = []
     max_start = max(0, len(words) - 1)
@@ -629,9 +849,9 @@ def extract_repeated_term_candidates(text: str) -> List[str]:
         for start in range(0, max(0, len(words) - size + 1)):
             phrase_words = words[start:start + size]
             lowered = [word.lower() for word in phrase_words]
-            if lowered[0] in FRENCH_STOPWORDS or lowered[-1] in FRENCH_STOPWORDS:
+            if stopwords and (lowered[0] in stopwords or lowered[-1] in stopwords):
                 continue
-            if all(word in FRENCH_STOPWORDS for word in lowered):
+            if stopwords and all(word in stopwords for word in lowered):
                 continue
             phrase = " ".join(phrase_words)
             if len(phrase) < 8:
@@ -644,6 +864,7 @@ def suggest_glossary_candidates(
     source_dir: Path,
     files: List[str],
     existing_glossary: Dict[str, str],
+    source_language: Optional[str] = None,
     max_candidates: int = 80,
 ) -> List[Dict[str, str]]:
     existing_keys = {normalize_space(key).casefold() for key in existing_glossary}
@@ -674,11 +895,11 @@ def suggest_glossary_candidates(
             continue
         tree, units = collect_text_units(source_file)
         plain_text = " ".join(unit.plain_text for unit in units)
-        for phrase in extract_inline_glossary_candidates(tree):
+        for phrase in extract_inline_glossary_candidates(tree, source_language=source_language):
             record(phrase, "inline emphasis", href)
         for phrase in extract_named_entity_candidates(plain_text):
             record(phrase, "capitalized phrase", href)
-        for phrase in extract_repeated_term_candidates(plain_text):
+        for phrase in extract_repeated_term_candidates(plain_text, source_language=source_language):
             record(phrase, "repeated term", href)
 
     ranked = []
@@ -712,7 +933,7 @@ def write_glossary_suggestions(
         "",
         f"Project: `{project_name}`",
         "",
-        f"| French | Suggested {language_name} | Count | Why | Seen In |",
+        f"| Source | Suggested {language_name} | Count | Why | Seen In |",
         "| --- | --- | --- | --- | --- |",
     ]
     if not suggestions:
@@ -845,10 +1066,11 @@ def build_qa_feedback_text(chunk_feedback: Optional[Dict]) -> str:
     lines = [
         "Previous QA findings for this chunk:",
         f"- summary: {chunk_feedback.get('summary') or 'Previous translation had meaningful issues.'}",
-        "- Fix the problems below in this retranslation.",
+        "- Treat every issue below as a mandatory correction target in this retranslation.",
+        "- Resolve the underlying source-meaning or wording problem, not just the surface phrasing called out by QA.",
         "- Do not preserve broken phrasing from the previous attempt.",
     ]
-    for issue in issues[:5]:
+    for issue in issues:
         lines.append(
             f"- [{issue.get('severity', 'unknown')}/{issue.get('category', 'unknown')}] {issue.get('note', '').strip()}"
         )
@@ -906,12 +1128,168 @@ def build_qa_history_filename(requests: List[Dict], now: Optional[dt.datetime] =
     return f"{stamp}_{scope}.md"
 
 
-def generate_qa_report(translated_files: Iterable[Path], glossary: Dict[str, str], qa_path: Path) -> None:
+def summarize_qa_scope(requests: List[Dict], all_files: Optional[List[str]] = None) -> Dict:
+    hrefs = sorted({request.get("href") for request in requests if request.get("href")})
+    chunk_count = len([request for request in requests if request.get("href")])
+    all_files_normalized = sorted(all_files or [])
+    scope_type = "empty"
+    if hrefs:
+        if all_files_normalized and hrefs == all_files_normalized:
+            scope_type = "full"
+        elif len(hrefs) == 1:
+            scope_type = "chapter"
+        else:
+            scope_type = "partial"
+    return {
+        "scope_type": scope_type,
+        "hrefs": hrefs,
+        "chapter_count": len(hrefs),
+        "chunk_count": chunk_count,
+        "all_files": all_files_normalized,
+    }
+
+
+def load_qa_index(paths: Dict[str, Path]) -> Dict:
+    return load_json(paths["qa_index"], {"active_snapshot": None, "snapshots": []})
+
+
+def save_qa_index(paths: Dict[str, Path], data: Dict) -> None:
+    save_json(paths["qa_index"], data)
+
+
+def register_qa_snapshot(
+    project_dir: Path,
+    snapshot_path: Path,
+    requests: List[Dict],
+    checked_chunks: int,
+    findings: int,
+    failed_chunks: int,
+    scope_override: Optional[Dict] = None,
+    make_active: bool = True,
+) -> Dict:
+    paths = project_paths(project_dir)
+    all_files = visible_content_files(paths["source_dir"]) if paths["source_dir"].exists() else []
+    scope = dict(scope_override or summarize_qa_scope(requests, all_files=all_files))
+    if scope_override and all_files and not scope.get("all_files"):
+        scope["all_files"] = all_files
+    snapshot = {
+        "path": str(snapshot_path),
+        "sha256": file_sha256(snapshot_path),
+        "created_at": utc_now_iso(),
+        "checked_chunks": checked_chunks,
+        "findings": findings,
+        "failed_chunks": failed_chunks,
+        **scope,
+    }
+    index = load_qa_index(paths)
+    snapshots = [item for item in index.get("snapshots", []) if item.get("path") != snapshot["path"]]
+    snapshots.append(snapshot)
+    index["snapshots"] = snapshots[-50:]
+    if make_active:
+        index["active_snapshot"] = snapshot
+    save_qa_index(paths, index)
+    return snapshot
+
+
+def infer_qa_snapshot_scope(snapshot_path: Path, source_dir: Path) -> Dict:
+    feedback = load_qa_feedback(snapshot_path)
+    requests = []
+    for href, chunks in feedback.items():
+        for chunk_index in chunks:
+            requests.append({"href": href, "chunk_index": chunk_index})
+    all_files = visible_content_files(source_dir) if source_dir.exists() else []
+    scope = summarize_qa_scope(requests, all_files=all_files)
+    return {
+        "path": str(snapshot_path),
+        "sha256": file_sha256(snapshot_path),
+        "created_at": dt.datetime.fromtimestamp(snapshot_path.stat().st_mtime, tz=dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z") if snapshot_path.exists() else None,
+        "checked_chunks": scope["chunk_count"],
+        "findings": sum(len(chunks) for chunks in feedback.values()),
+        "failed_chunks": 0,
+        **scope,
+    }
+
+
+def resolve_qa_snapshot(
+    project_dir: Path,
+    selected_files: List[str],
+    explicit_snapshot: Optional[str] = None,
+    allow_partial_retry: bool = False,
+) -> Tuple[Path, Dict, Dict[str, Dict[int, Dict]]]:
+    paths = project_paths(project_dir)
+    source_dir = paths["source_dir"]
+    index = load_qa_index(paths)
+    snapshot_meta: Optional[Dict] = None
+
+    if explicit_snapshot:
+        snapshot_path = Path(explicit_snapshot)
+        if not snapshot_path.is_absolute():
+            snapshot_path = (project_dir / snapshot_path).resolve()
+        if not snapshot_path.exists():
+            raise RuntimeError(f"QA snapshot not found: {snapshot_path}")
+        snapshot_meta = infer_qa_snapshot_scope(snapshot_path, source_dir)
+    else:
+        active_snapshot = index.get("active_snapshot")
+        snapshots = index.get("snapshots", [])
+        if len(selected_files) == 1:
+            target_href = selected_files[0]
+            candidates = [
+                item for item in snapshots
+                if target_href in item.get("hrefs", []) or item.get("scope_type") == "full"
+            ]
+            if active_snapshot and (target_href in active_snapshot.get("hrefs", []) or active_snapshot.get("scope_type") == "full"):
+                snapshot_meta = active_snapshot
+            elif candidates:
+                snapshot_meta = max(candidates, key=lambda item: item.get("created_at", ""))
+        else:
+            full_snapshots = [item for item in snapshots if item.get("scope_type") == "full"]
+            if active_snapshot and active_snapshot.get("scope_type") == "full":
+                snapshot_meta = active_snapshot
+            elif full_snapshots:
+                snapshot_meta = max(full_snapshots, key=lambda item: item.get("created_at", ""))
+            elif active_snapshot:
+                snapshot_meta = active_snapshot
+        if not snapshot_meta:
+            snapshot_path = paths["qa_cloud"]
+            if not snapshot_path.exists():
+                return snapshot_path, {"scope_type": "empty", "hrefs": [], "chapter_count": 0, "chunk_count": 0}, {}
+            snapshot_meta = infer_qa_snapshot_scope(snapshot_path, source_dir)
+        snapshot_path = Path(snapshot_meta["path"])
+
+    if not snapshot_path.exists():
+        raise RuntimeError(f"Resolved QA snapshot does not exist: {snapshot_path}")
+
+    snapshot_hrefs = set(snapshot_meta.get("hrefs", []))
+    full_book_run = len(selected_files) > 1
+    if full_book_run and snapshot_meta.get("scope_type") not in {"full", "empty"} and not allow_partial_retry:
+        raise RuntimeError(
+            "Refusing whole-book retry with a partial QA snapshot. "
+            "Run with --qa-snapshot <full_report.md>, or use --allow-partial-qa-retry, or target one chapter with --chapter."
+        )
+    if len(selected_files) == 1 and snapshot_meta.get("scope_type") not in {"full", "empty"}:
+        target_href = selected_files[0]
+        if target_href not in snapshot_hrefs:
+            raise RuntimeError(
+                f"QA snapshot {snapshot_path} does not cover requested chapter {target_href}. "
+                "Use --qa-snapshot with a matching report or run without QA-guided retry."
+            )
+
+    feedback = load_qa_feedback(snapshot_path)
+    return snapshot_path, snapshot_meta, feedback
+
+
+def generate_qa_report(
+    translated_files: Iterable[Path],
+    glossary: Dict[str, str],
+    qa_path: Path,
+    source_language: Optional[str] = None,
+) -> None:
+    markers = source_language_profile(source_language).get("markers", set())
     lines = ["# QA Report", "", "## Checks", ""]
     for file_path in translated_files:
         status = {
             "xml_ok": "PASS",
-            "french_leftovers": "PASS",
+            "source_leftovers": "PASS",
             "formatting": "PASS",
             "terminology": "PASS",
             "sentence_breaks": "PASS",
@@ -927,9 +1305,9 @@ def generate_qa_report(translated_files: Iterable[Path], glossary: Dict[str, str
         if root is not None:
             text = " ".join(normalize_space("".join(elem.itertext())) for elem in root.iter())
             lowered = f" {text.lower()} "
-            if sum(marker in lowered for marker in FRENCH_MARKERS) >= 3:
-                status["french_leftovers"] = "WARN"
-                notes.append("French function-word heuristics detected residual French text.")
+            if markers and sum(marker in lowered for marker in markers) >= 3:
+                status["source_leftovers"] = "WARN"
+                notes.append(f"{source_language_name(source_language)} marker heuristics detected residual source-language text.")
             for fr, en in glossary.items():
                 if fr in text and en not in text:
                     status["terminology"] = "WARN"
@@ -999,7 +1377,11 @@ def build_qa_requests(
             custom_id = f"{project_dir.name}:{href}:qa:{chunk_index:04d}"
             body = {
                 "model": model,
-                "input": build_qa_payload(pairs, config["translation"].get("target_language", "en")),
+                "input": build_qa_payload(
+                    pairs,
+                    config["translation"].get("source_language", "fr"),
+                    config["translation"].get("target_language", "en"),
+                ),
             }
             request_line = {
                 "custom_id": custom_id,
@@ -1017,6 +1399,352 @@ def build_qa_requests(
                 }
             )
     return requests, request_map, total_source_chars, total_translation_chars
+
+
+def resolve_snapshot_for_manifest(project_dir: Path, explicit_snapshot: Optional[str] = None) -> Tuple[Path, Dict]:
+    paths = project_paths(project_dir)
+    if explicit_snapshot:
+        snapshot_path = Path(explicit_snapshot)
+        if not snapshot_path.is_absolute():
+            snapshot_path = (project_dir / snapshot_path).resolve()
+        if not snapshot_path.exists():
+            raise RuntimeError(f"QA snapshot not found: {snapshot_path}")
+        return snapshot_path, infer_qa_snapshot_scope(snapshot_path, paths["source_dir"])
+    index = load_qa_index(paths)
+    active_snapshot = index.get("active_snapshot")
+    if active_snapshot:
+        snapshot_path = Path(active_snapshot["path"])
+        if snapshot_path.exists():
+            return snapshot_path, active_snapshot
+    if paths["qa_cloud"].exists():
+        return paths["qa_cloud"], infer_qa_snapshot_scope(paths["qa_cloud"], paths["source_dir"])
+    raise RuntimeError("No QA snapshot available. Run cloud QA first or pass --qa-snapshot.")
+
+
+def structural_file_hint(href: str) -> bool:
+    return href.endswith(("toc.xhtml", "toc01.xhtml", "tp01.xhtml", "cop01.xhtml", "acheve_12.xhtml", "ftn01.xhtml"))
+
+
+def classify_issue_fix_mode(
+    issue: Dict[str, str],
+    href: str,
+    source_language: Optional[str],
+    target_language: str,
+) -> Tuple[str, str]:
+    category = issue.get("category", "")
+    note = (issue.get("note", "") or "").lower()
+    source_excerpt = issue.get("source_excerpt", "") or ""
+    translation_excerpt = issue.get("translation_excerpt", "") or ""
+    structural_hint = structural_file_hint(href) or structural_translation(source_excerpt, source_language, target_language) is not None
+    numeric_mismatch = has_obvious_number_mismatch(source_excerpt, translation_excerpt)
+
+    if category == "leftover_french":
+        return "local", f"leftover {source_language_name(source_language)} / marker cleanup"
+    if category == "formatting":
+        if structural_hint or any(token in note for token in ("spacing", "spacj", "odstęp", "glued", "zlane", "sklej", "missing space", "punctuation", "typograph")):
+            return "local", "deterministic formatting cleanup"
+        return "model", "formatting issue still needs semantic rewrite"
+    if category == "accuracy":
+        if structural_hint:
+            return "local", "structural or metadata label mismatch"
+        if numeric_mismatch or any(token in note for token in ("year", "rok", "date", "liczb", "fact", "faktografic")):
+            return "local", "numeric/date mismatch"
+        return "model", "semantic accuracy issue"
+    if category == "terminology":
+        if structural_hint:
+            return "local", "structural terminology fix"
+        return "model", "terminology issue in prose"
+    if category == "fluency":
+        if any(token in note for token in ("typo", "spacj", "spacing", "broken polish syntax", "text damage", "uszkodzona składnia")):
+            return "local", "surface fluency cleanup"
+        return "model", "fluency issue in prose"
+    return "model", "default to model/manual remediation"
+
+
+def qa_issue_counts(feedback: Dict[str, Dict[int, Dict]]) -> Dict[str, int]:
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for chunks in feedback.values():
+        for chunk_feedback in chunks.values():
+            for issue in chunk_feedback.get("issues") or []:
+                severity = qa_issue_effective_severity(issue)
+                if severity in counts:
+                    counts[severity] += 1
+    return counts
+
+
+def qa_issue_effective_severity(issue: Dict) -> str:
+    severity = issue.get("effective_severity") or issue.get("severity") or "low"
+    if severity != "high":
+        return severity
+    note = (issue.get("note") or "").lower()
+    category = (issue.get("category") or "").lower()
+    translation_excerpt = (issue.get("translation_excerpt") or "").lower()
+    if "omit if strictly source-based" in note:
+        return "medium"
+    if "nie zgłaszać" in note:
+        return "medium"
+    if "wiernie oddaje francuski" in note:
+        return "medium"
+    if "source segment is textually corrupted" in note:
+        return "medium"
+    if "source segment is textually damaged" in note:
+        return "medium"
+    if "nosi ślad uszkodzenia" in note:
+        return "medium"
+    if "text damage rather than a deliberate omission" in note:
+        return "medium"
+    if "masking source damage" in note:
+        return "medium"
+    if category == "leftover_french" and any(token in translation_excerpt for token in ("école", "société française")):
+        return "medium"
+    return severity
+
+
+def qa_issue_gate_reason(issue: Dict) -> Optional[str]:
+    if (issue.get("severity") or "low") != "high":
+        return None
+    note = (issue.get("note") or "").lower()
+    category = (issue.get("category") or "").lower()
+    translation_excerpt = (issue.get("translation_excerpt") or "").lower()
+    if "omit if strictly source-based" in note:
+        return "qa_self_negated_source_based"
+    if "nie zgłaszać" in note or "wiernie oddaje francuski" in note:
+        return "qa_self_negated_source_based"
+    if "source segment is textually corrupted" in note or "source segment is textually damaged" in note:
+        return "source_text_corruption"
+    if "nosi ślad uszkodzenia" in note or "masking source damage" in note:
+        return "source_text_corruption"
+    if "text damage rather than a deliberate omission" in note:
+        return "source_text_damage"
+    if category == "leftover_french" and any(token in translation_excerpt for token in ("école", "société française")):
+        return "retained_institution_name"
+    return None
+
+
+def annotate_qa_issues_for_gate(issues: List[Dict]) -> List[Dict]:
+    annotated: List[Dict] = []
+    for issue in issues:
+        annotated_issue = dict(issue)
+        annotated_issue["effective_severity"] = qa_issue_effective_severity(annotated_issue)
+        gate_reason = qa_issue_gate_reason(annotated_issue)
+        if gate_reason:
+            annotated_issue["gate_reason"] = gate_reason
+        annotated.append(annotated_issue)
+    return annotated
+
+
+def build_remediation_manifest(project_dir: Path, config: Dict, snapshot_path: Path, snapshot_meta: Dict) -> Dict:
+    feedback = load_qa_feedback(snapshot_path)
+    source_language = config["translation"].get("source_language", "fr")
+    target_language = config["translation"].get("target_language", "en")
+    chunks: List[Dict] = []
+    baseline_counts = qa_issue_counts(feedback)
+    for href in sorted(feedback):
+        for chunk_index in sorted(feedback[href]):
+            chunk_feedback = feedback[href][chunk_index]
+            high_issues = [
+                issue
+                for issue in annotate_qa_issues_for_gate(chunk_feedback.get("issues") or [])
+                if qa_issue_effective_severity(issue) == "high"
+            ]
+            if not high_issues:
+                continue
+            manifest_issues = []
+            chunk_modes = []
+            for issue in high_issues:
+                fix_mode, reason = classify_issue_fix_mode(issue, href, source_language, target_language)
+                manifest_issues.append(
+                    {
+                        **issue,
+                        "fix_mode": fix_mode,
+                        "fix_reason": reason,
+                    }
+                )
+                chunk_modes.append(fix_mode)
+            chunk_fix_mode = "local" if chunk_modes and all(mode == "local" for mode in chunk_modes) else "model"
+            chunks.append(
+                {
+                    "chunk_key": f"{href}::chunk::{chunk_index:04d}",
+                    "href": href,
+                    "chunk_index": chunk_index,
+                    "summary": chunk_feedback.get("summary") or "High-severity QA issues",
+                    "chunk_fix_mode": chunk_fix_mode,
+                    "issues": manifest_issues,
+                    "local_status": "pending" if any(issue["fix_mode"] == "local" for issue in manifest_issues) else "not_applicable",
+                    "model_status": "pending" if any(issue["fix_mode"] == "model" for issue in manifest_issues) else "not_applicable",
+                    "qa_changed_status": "pending",
+                    "changed": False,
+                    "last_error": None,
+                }
+            )
+    local_chunks = len([chunk for chunk in chunks if chunk["local_status"] != "not_applicable"])
+    model_chunks = len([chunk for chunk in chunks if chunk["model_status"] != "not_applicable"])
+    return {
+        "project": project_dir.name,
+        "created_at": utc_now_iso(),
+        "qa_snapshot": {
+            **snapshot_meta,
+            "path": str(snapshot_path),
+            "sha256": file_sha256(snapshot_path),
+        },
+        "quality_gate": config["pipeline"]["quality_gate"],
+        "api_budget_usd": config["pipeline"]["api_budget_usd"],
+        "targeted_retry_max_chunks": config["pipeline"]["targeted_retry_max_chunks"],
+        "targeted_retry_rounds": 0,
+        "estimated_spend_usd": 0.0,
+        "stop_loss_triggered": None,
+        "summary": {
+            "baseline_counts": baseline_counts,
+            "selected_high_chunks": len(chunks),
+            "local_chunks": local_chunks,
+            "model_chunks": model_chunks,
+        },
+        "chunks": chunks,
+        "qa_changed": None,
+    }
+
+
+def load_remediation_plan(plan_path: Path) -> Dict:
+    if not plan_path.exists():
+        raise RuntimeError(f"Remediation plan not found: {plan_path}")
+    return load_json(plan_path, {})
+
+
+def save_remediation_plan(plan_path: Path, data: Dict) -> None:
+    save_json(plan_path, data)
+
+
+def verify_frozen_snapshot(manifest: Dict) -> None:
+    snapshot = manifest.get("qa_snapshot") or {}
+    snapshot_path = Path(snapshot.get("path", ""))
+    if snapshot_path.exists():
+        current_sha = file_sha256(snapshot_path)
+        expected_sha = snapshot.get("sha256")
+        if expected_sha and current_sha != expected_sha:
+            raise RuntimeError(
+                f"Frozen QA snapshot changed since remediation plan creation: {snapshot_path}"
+            )
+
+
+def progress_lookup_for_href(progress: Dict, href: str) -> Dict[Tuple[str, str], str]:
+    return {
+        tuple(key.split("::", 1)): value
+        for key, value in progress.get("translations", {}).get(href, {}).items()
+    }
+
+
+def save_translated_lookup_for_href(
+    paths: Dict[str, Path],
+    progress: Dict,
+    href: str,
+    translated_lookup: Dict[Tuple[str, str], str],
+) -> Path:
+    progress["translations"][href] = {
+        f"{xpath}::{field}": value for (xpath, field), value in translated_lookup.items()
+    }
+    source_file = paths["source_dir"] / href
+    target_file = paths["translated_dir"] / href
+    tree, _ = collect_text_units(source_file)
+    assign_translations(tree, translated_lookup)
+    ensure_dir(target_file.parent)
+    tree.write(target_file, encoding="utf-8", xml_declaration=True)
+    return target_file
+
+
+def load_chunk_from_source(paths: Dict[str, Path], href: str, chunk_index: int, max_chars: int) -> List[TextUnit]:
+    source_file = paths["source_dir"] / href
+    _, units = collect_text_units(source_file)
+    chunks = chunk_units(units, max_chars)
+    if chunk_index >= len(chunks):
+        raise RuntimeError(f"Chunk {chunk_index} out of range for {href}")
+    return chunks[chunk_index]
+
+
+def repair_formatting_excerpt(excerpt: str, note: str) -> Optional[str]:
+    normalized_excerpt = normalize_space(excerpt)
+    if not normalized_excerpt:
+        return None
+    suggestions = extract_note_suggestions(note)
+    if len(suggestions) == 1 and suggestions[0] != normalized_excerpt:
+        return suggestions[0]
+    lowered_note = (note or "").lower()
+    if "missing space" in lowered_note or "brak spacji" in lowered_note:
+        match = re.match(
+            r"^(do|na|od|po|za|bez|przy|pod|nad|nie)([A-Za-zÀ-ÿąćęłńóśźżĄĆĘŁŃÓŚŹŻ-]{4,})$",
+            normalized_excerpt,
+        )
+        if match:
+            return f"{match.group(1)} {match.group(2)}"
+    normalized = normalize_spacing_artifacts(normalized_excerpt)
+    if normalized != normalized_excerpt:
+        return normalized
+    return None
+
+
+def apply_local_fixes_to_unit(
+    unit: TextUnit,
+    current_translation: str,
+    issues: List[Dict[str, str]],
+    source_language: Optional[str],
+    target_language: str,
+) -> str:
+    if not issues:
+        return current_translation
+    updated = current_translation
+    applicable = [issue for issue in issues if issue_matches_unit(issue, unit, current_translation)]
+    if not applicable:
+        return updated
+
+    if len(unit.targets) == 1:
+        mapped = structural_translation(unit.plain_text, source_language, target_language)
+        if mapped and any(issue.get("fix_mode") == "local" for issue in applicable):
+            updated = preserve_outer_whitespace(unit.targets[0].original_text, mapped)
+
+    if target_language.split("-", 1)[0].lower() == "pl":
+        updated = re.sub(r"(\d+)\s*(\[\[SEG_\d+\]\])\s*er\b", r"\1\2", updated)
+        updated = re.sub(r"(\d+)er\b", r"\1", updated)
+        updated = re.sub(r"([IVXLCDM]+)\s*(\[\[SEG_\d+\]\])\s*e\b", r"\1\2", updated)
+        updated = re.sub(r"([IVXLCDM]+)e\b", r"\1", updated)
+
+    if has_obvious_number_mismatch(unit.text, updated):
+        updated = replace_number_tokens_from_source(unit.text, updated)
+
+    for issue in applicable:
+        excerpt = issue.get("translation_excerpt", "") or ""
+        replacement = repair_formatting_excerpt(excerpt, issue.get("note", "") or "")
+        if replacement and excerpt and excerpt in updated:
+            updated = updated.replace(excerpt, replacement)
+            continue
+        normalized_excerpt = normalize_matching_text(excerpt)
+        normalized_updated = normalize_matching_text(updated)
+        if replacement and normalized_excerpt and normalized_excerpt == normalized_updated:
+            updated = replacement
+            continue
+        if replacement and normalized_excerpt and len(unit.targets) == 1 and normalized_excerpt in normalized_updated:
+            updated = replacement
+
+    updated = normalize_spacing_artifacts(updated)
+    return updated
+
+
+def estimate_direct_request_cost(model: str, input_chars: int, output_chars: int) -> float:
+    pricing = PRICE_TABLE.get(model)
+    if not pricing:
+        return 0.0
+    input_tokens = math.ceil(input_chars / 4)
+    output_tokens = math.ceil(output_chars / 4)
+    input_cost = input_tokens / 1_000_000 * pricing["input"]
+    output_cost = output_tokens / 1_000_000 * pricing["output"]
+    return input_cost + output_cost
+
+
+def qa_counts_from_issue_list(issues: List[Dict]) -> Dict[str, int]:
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for issue in issues:
+        severity = qa_issue_effective_severity(issue)
+        if severity in counts:
+            counts[severity] += 1
+    return counts
 
 
 def detect_output_text(body: Dict) -> str:
@@ -1093,11 +1821,13 @@ def download_openai_file(api_key: str, file_id: str, destination: Path) -> None:
 def build_chunk_payload(
     chunk: List[TextUnit],
     glossary: Dict[str, str],
+    source_language: Optional[str],
     target_language: str,
     qa_feedback_text: str = "",
     strong_formatting_retry: bool = False,
 ) -> List[Dict]:
     language_name = target_language_name(target_language)
+    source_name = source_language_name(source_language)
     glossary_lines = [f"- {fr} => {en}" for fr, en in glossary.items()]
     glossary_text = "\n".join(glossary_lines) if glossary_lines else "- none yet"
     units = [{"id": index, "text": normalize_space(unit.text)} for index, unit in enumerate(chunk)]
@@ -1105,9 +1835,10 @@ def build_chunk_payload(
     if qa_feedback_text:
         feedback_block = (
             "\nThis is a retry of a previously translated chunk.\n"
-            "Use the QA findings below as corrective guidance while translating from the French source again.\n"
-            "The old translation may be wrong; fix the underlying issues rather than paraphrasing the QA notes.\n"
+            f"Use the QA findings below as a mandatory correction checklist while translating from the {source_name} source again.\n"
+            f"The old translation may be wrong; retranslate from the {source_name} and fix the underlying issues rather than paraphrasing the QA notes.\n"
             "If QA reported formatting or broken-syntax damage, reconstruct a fluent target sentence while still returning one translation per segment id.\n"
+            "Before finalizing, silently verify that none of the listed QA defects remain in your new translation.\n"
             f"{qa_feedback_text}\n"
         )
     formatting_retry_block = ""
@@ -1119,51 +1850,38 @@ def build_chunk_payload(
             "Return translations that read naturally in sequence when the segments are concatenated in order.\n"
             "When a sentence spans multiple segments, coordinate the phrasing across those segments so the combined sentence is grammatical.\n"
         )
-    user_prompt = (
-        f"Translate the following French paragraph segments into {language_name}.\n"
-        "Return strict JSON in the form {\"translations\": [{\"id\": 0, \"text\": \"...\"}]}.\n"
-        "Do not omit any segment. Do not add commentary.\n"
-        "Preserve the visible meaning, tone, and rhetorical structure.\n"
-        f"Do not leave stray French words in the {language_name} unless they are proper nouns, publication titles, or intentionally retained foreign terms.\n"
-        f"Avoid awkward literalism. Prefer idiomatic literary {language_name} where needed.\n"
-        "Do not introduce doubled articles or doubled words.\n"
-        "If you retain an italicized foreign term, inflect or frame the surrounding phrase so the sentence remains grammatically natural.\n"
-        f"If a phrase is idiomatic or culturally embedded, render its meaning in fluent literary {language_name} rather than calquing it.\n"
-        "Some segments contain inline-structure placeholders like [[SEG_1]], [[SEG_2]], etc.\n"
-        "Copy every placeholder exactly once and keep them in ascending order inside that segment.\n"
-        "Do not translate, remove, renumber, or duplicate placeholders.\n"
-        f"{formatting_retry_block}"
-        f"{feedback_block}"
-        f"Glossary:\n{glossary_text}\n\n"
-        f"Segments:\n{json.dumps(units, ensure_ascii=False)}"
+    user_prompt = render_prompt_template(
+        "translation_user.txt",
+        source_language_name=source_name,
+        language_name=language_name,
+        formatting_retry_block=formatting_retry_block,
+        feedback_block=feedback_block,
+        glossary_text=glossary_text,
+        segments_json=json.dumps(units, ensure_ascii=False),
     )
     return [
-        {"role": "system", "content": build_system_prompt(target_language)},
+        {"role": "system", "content": build_system_prompt(target_language, source_language=source_language)},
         {"role": "user", "content": user_prompt},
     ]
 
 
-def build_qa_payload(pairs: List[Dict[str, str]], target_language: str) -> List[Dict]:
+def build_qa_payload(
+    pairs: List[Dict[str, str]],
+    source_language: Optional[str],
+    target_language: str,
+) -> List[Dict]:
     language_name = target_language_name(target_language)
-    system_prompt = f"""You are a meticulous bilingual QA reviewer for book translations.
-Compare French source text against its {language_name} translation.
-
-Your job:
-- identify only real problems,
-- focus on meaning drift, omissions, leftover French, broken syntax, terminology inconsistency, and formatting-related text damage,
-- ignore acceptable stylistic variation,
-- keep the report concise,
-- do not rewrite the whole passage,
-- if there are no meaningful problems, return an empty issues list.
-"""
-    user_prompt = (
-        f"Review the following French source segments and their {language_name} translations.\n"
-        "Return strict JSON in the form "
-        "{\"issues\": [{\"severity\": \"high|medium|low\", \"category\": \"accuracy|fluency|terminology|leftover_french|formatting\", "
-        "\"source_excerpt\": \"...\", \"translation_excerpt\": \"...\", \"note\": \"...\"}], "
-        "\"summary\": \"one short sentence\"}.\n"
-        "Return at most 5 issues. Do not add commentary outside JSON.\n\n"
-        f"Segments:\n{json.dumps(pairs, ensure_ascii=False)}"
+    source_name = source_language_name(source_language)
+    system_prompt = render_prompt_template(
+        "qa_system.txt",
+        source_language_name=source_name,
+        language_name=language_name,
+    )
+    user_prompt = render_prompt_template(
+        "qa_user.txt",
+        source_language_name=source_name,
+        language_name=language_name,
+        segments_json=json.dumps(pairs, ensure_ascii=False),
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -1377,12 +2095,25 @@ def sync_navigation_documents(translated_dir: Path) -> None:
             tree.write(ncx_path, encoding="utf-8", xml_declaration=True)
 
 
+def assemble_final_epub(project_dir: Path, config: Dict) -> Dict[str, str]:
+    paths = project_paths(project_dir)
+    target_language = config["translation"].get("target_language", "en")
+    normalize_translated_package(paths["translated_dir"], target_language)
+    sync_navigation_documents(paths["translated_dir"])
+    rezip_epub(paths["translated_dir"], paths["output_epub"])
+    return {
+        "project": project_dir.name,
+        "output_epub": str(paths["output_epub"]),
+        "translated_dir": str(paths["translated_dir"]),
+    }
+
+
 def text_unit_from_dict(data: Dict) -> TextUnit:
     return TextUnit(
         xpath=data["xpath"],
         field=data["field"],
         text=data["text"],
-        plain_text=data.get("plain_text") or normalize_space("".join(target["original_text"] for target in data["targets"])),
+        plain_text=data.get("plain_text") or normalize_space(" ".join(target["original_text"] for target in data["targets"])),
         targets=[TextTarget(**target) for target in data["targets"]],
     )
 
@@ -1407,6 +2138,7 @@ def create_progress_stub(epub_path: Path) -> Dict:
 def cmd_init_project(args: argparse.Namespace) -> None:
     project_root = Path(args.project_root)
     epub_path = Path(args.epub).resolve()
+    source_language = args.source_language or "fr"
     target_language = args.target_language or "en"
     project_dir = infer_project_dir(args.project, args.epub, project_root, target_language=target_language)
     if project_dir.exists() and any(project_dir.iterdir()) and not args.force:
@@ -1416,9 +2148,14 @@ def cmd_init_project(args: argparse.Namespace) -> None:
     for key in ("project_dir", "source_dir", "translated_dir", "batch_requests", "batch_map"):
         if isinstance(paths[key], Path):
             ensure_dir(paths[key].parent if paths[key].suffix else paths[key])
-    config = default_project_config(epub_path, project_dir, target_language=target_language)
+    config = default_project_config(
+        epub_path,
+        project_dir,
+        target_language=target_language,
+        source_language=source_language,
+    )
     save_project_config(project_dir, config)
-    write_default_glossary(paths["glossary"], target_language=target_language)
+    write_default_glossary(paths["glossary"], target_language=target_language, source_language=source_language)
     write_default_qa(paths["qa"])
     save_json(paths["progress"], create_progress_stub(epub_path))
     unzip_epub(epub_path, paths["source_dir"])
@@ -1442,6 +2179,10 @@ def cmd_configure_openai(args: argparse.Namespace) -> None:
     project_dir = infer_project_dir(args.project, None, Path(args.project_root))
     config = read_project_config(project_dir)
     openai = config["openai"]
+    if args.source_language is not None:
+        config["translation"]["source_language"] = args.source_language
+    if args.target_language is not None:
+        config["translation"]["target_language"] = args.target_language
     if args.model is not None:
         openai["model"] = args.model
     if args.temperature is not None:
@@ -1456,6 +2197,56 @@ def cmd_configure_openai(args: argparse.Namespace) -> None:
         config["translation"]["run_qa_after_apply"] = args.run_qa_after_apply
     save_project_config(project_dir, config)
     print(json.dumps({"openai": openai, "translation": config["translation"]}, ensure_ascii=False, indent=2))
+
+
+def cmd_draft(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    if config["openai"].get("use_batch_api", True):
+        cmd_run_batch(
+            argparse.Namespace(
+                project=args.project,
+                project_root=args.project_root,
+                chapter=args.chapter,
+                max_chars=args.max_chars,
+                reuse_qa_feedback=False,
+                retry_only_high=False,
+                qa_snapshot=None,
+                allow_partial_qa_retry=False,
+            )
+        )
+        return
+    cmd_translate_direct(
+        argparse.Namespace(
+            project=args.project,
+            project_root=args.project_root,
+            chapter=args.chapter,
+            max_chunks=args.max_chunks,
+            max_chars=args.max_chars,
+            reuse_qa_feedback=False,
+            retry_only_high=False,
+            qa_snapshot=None,
+            allow_partial_qa_retry=False,
+        )
+    )
+
+
+def cmd_review(args: argparse.Namespace) -> None:
+    cmd_validate_local(
+        argparse.Namespace(
+            project=args.project,
+            project_root=args.project_root,
+            chapter=args.chapter,
+            max_chars=args.max_chars,
+        )
+    )
+
+
+def cmd_finalize(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    result = assemble_final_epub(project_dir, config)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_estimate_cost(args: argparse.Namespace) -> None:
@@ -1507,6 +2298,7 @@ def cmd_suggest_glossary(args: argparse.Namespace) -> None:
         source_dir,
         files,
         load_glossary(paths["glossary"]),
+        source_language=config["translation"].get("source_language", "fr"),
         max_candidates=args.max_candidates,
     )
     write_glossary_suggestions(
@@ -1544,12 +2336,27 @@ def cmd_prepare_batch(args: argparse.Namespace) -> None:
     paths = project_paths(project_dir)
     source_dir = paths["source_dir"]
     glossary = load_glossary(paths["glossary"])
-    qa_feedback = load_qa_feedback(paths["qa_cloud"])
     progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
     selected_files = [args.chapter] if args.chapter else visible_content_files(source_dir)
+    if should_use_qa_feedback(args):
+        qa_snapshot_path, qa_snapshot_meta, qa_feedback = resolve_qa_snapshot(
+            project_dir,
+            selected_files,
+            explicit_snapshot=args.qa_snapshot,
+            allow_partial_retry=args.allow_partial_qa_retry,
+        )
+    else:
+        qa_snapshot_path = paths["qa_cloud"]
+        qa_snapshot_meta = {"scope_type": "disabled", "hrefs": [], "chapter_count": 0, "chunk_count": 0}
+        qa_feedback = {}
 
     requests: List[str] = []
-    request_map = {"project": project_dir.name, "requests": []}
+    request_map = {
+        "project": project_dir.name,
+        "qa_snapshot_path": str(qa_snapshot_path),
+        "qa_snapshot_meta": qa_snapshot_meta,
+        "requests": [],
+    }
     max_chars = args.max_chars or config["translation"]["max_chars_per_chunk"]
     retry_only_high = args.retry_only_high
     for href in selected_files:
@@ -1569,6 +2376,7 @@ def cmd_prepare_batch(args: argparse.Namespace) -> None:
                 "input": build_chunk_payload(
                     chunk,
                     glossary,
+                    config["translation"].get("source_language", "fr"),
                     config["translation"].get("target_language", "en"),
                     qa_feedback_text=qa_feedback_text,
                     strong_formatting_retry=strong_formatting_retry,
@@ -1577,7 +2385,7 @@ def cmd_prepare_batch(args: argparse.Namespace) -> None:
             temperature = config["openai"].get("temperature")
             if config["openai"].get("send_temperature", True) and temperature is not None:
                 body["temperature"] = temperature
-            reasoning_effort = config["openai"].get("reasoning_effort")
+            reasoning_effort = reasoned_effort_for_mode(config, "targeted_retry" if qa_feedback_text else "draft")
             if reasoning_effort:
                 body["reasoning"] = {"effort": reasoning_effort}
             request_line = {
@@ -1600,7 +2408,18 @@ def cmd_prepare_batch(args: argparse.Namespace) -> None:
     ensure_dir(paths["batch_requests"].parent)
     paths["batch_requests"].write_text("\n".join(requests) + ("\n" if requests else ""), encoding="utf-8")
     save_json(paths["batch_map"], request_map)
-    print(json.dumps({"requests": len(requests), "batch_requests": str(paths["batch_requests"])}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "requests": len(requests),
+                "batch_requests": str(paths["batch_requests"]),
+                "qa_snapshot_path": str(qa_snapshot_path),
+                "qa_scope": qa_snapshot_meta.get("scope_type"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def cmd_estimate_qa_cost(args: argparse.Namespace) -> None:
@@ -1656,13 +2475,28 @@ def cmd_run_batch(args: argparse.Namespace) -> None:
     paths = project_paths(project_dir)
     source_dir = paths["source_dir"]
     glossary = load_glossary(paths["glossary"])
-    qa_feedback = load_qa_feedback(paths["qa_cloud"])
     progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
     selected_files = [args.chapter] if args.chapter else visible_content_files(source_dir)
+    if should_use_qa_feedback(args):
+        qa_snapshot_path, qa_snapshot_meta, qa_feedback = resolve_qa_snapshot(
+            project_dir,
+            selected_files,
+            explicit_snapshot=args.qa_snapshot,
+            allow_partial_retry=args.allow_partial_retry if hasattr(args, "allow_partial_retry") else args.allow_partial_qa_retry,
+        )
+    else:
+        qa_snapshot_path = paths["qa_cloud"]
+        qa_snapshot_meta = {"scope_type": "disabled", "hrefs": [], "chapter_count": 0, "chunk_count": 0}
+        qa_feedback = {}
     max_chars = args.max_chars or config["translation"]["max_chars_per_chunk"]
 
     requests: List[str] = []
-    request_map = {"project": project_dir.name, "requests": []}
+    request_map = {
+        "project": project_dir.name,
+        "qa_snapshot_path": str(qa_snapshot_path),
+        "qa_snapshot_meta": qa_snapshot_meta,
+        "requests": [],
+    }
     qa_retry_chunks = 0
     strong_formatting_retries = 0
     retry_only_high = args.retry_only_high
@@ -1687,6 +2521,7 @@ def cmd_run_batch(args: argparse.Namespace) -> None:
                 "input": build_chunk_payload(
                     chunk,
                     glossary,
+                    config["translation"].get("source_language", "fr"),
                     config["translation"].get("target_language", "en"),
                     qa_feedback_text=qa_feedback_text,
                     strong_formatting_retry=strong_formatting_retry,
@@ -1695,7 +2530,7 @@ def cmd_run_batch(args: argparse.Namespace) -> None:
             temperature = config["openai"].get("temperature")
             if config["openai"].get("send_temperature", True) and temperature is not None:
                 body["temperature"] = temperature
-            reasoning_effort = config["openai"].get("reasoning_effort")
+            reasoning_effort = reasoned_effort_for_mode(config, "targeted_retry" if qa_feedback_text else "draft")
             if reasoning_effort:
                 body["reasoning"] = {"effort": reasoning_effort}
             request_line = {
@@ -1721,7 +2556,8 @@ def cmd_run_batch(args: argparse.Namespace) -> None:
     save_json(paths["batch_map"], request_map)
     log(
         f"[run-batch] Prepared {len(requests)} request(s) at {paths['batch_requests']} "
-        f"(qa_retry_chunks={qa_retry_chunks}, strong_formatting_retries={strong_formatting_retries})"
+        f"(qa_retry_chunks={qa_retry_chunks}, strong_formatting_retries={strong_formatting_retries}, "
+        f"qa_scope={qa_snapshot_meta.get('scope_type')}, qa_snapshot={qa_snapshot_path})"
     )
 
     input_file_id = upload_batch_file(api_key, paths["batch_requests"])
@@ -1762,7 +2598,10 @@ def cmd_run_batch(args: argparse.Namespace) -> None:
             "strong_formatting_retries": strong_formatting_retries,
             "batch_requests_path": str(paths["batch_requests"]),
             "batch_map_path": str(paths["batch_map"]),
-            "qa_snapshot": qa_snapshot_metadata(paths),
+            "qa_snapshot": {
+                **qa_snapshot_meta,
+                "path": str(qa_snapshot_path),
+            },
         },
     )
     print(
@@ -1773,6 +2612,8 @@ def cmd_run_batch(args: argparse.Namespace) -> None:
                 "batch_id": data.get("id"),
                 "status": data.get("status"),
                 "input_file_id": input_file_id,
+                "qa_snapshot_path": str(qa_snapshot_path),
+                "qa_scope": qa_snapshot_meta.get("scope_type"),
             },
             ensure_ascii=False,
             indent=2,
@@ -1790,6 +2631,8 @@ def cmd_run_qa_batch(args: argparse.Namespace) -> None:
     selected_files = [args.chapter] if args.chapter else visible_content_files(paths["source_dir"])
     max_chars = args.max_chars or config["translation"]["max_chars_per_chunk"]
     requests, request_map, _, _ = build_qa_requests(project_dir, config, selected_files, max_chars)
+    qa_scope = summarize_qa_scope(request_map.get("requests", []), all_files=visible_content_files(paths["source_dir"]))
+    request_map["qa_scope"] = qa_scope
 
     ensure_dir(paths["qa_batch_requests"].parent)
     paths["qa_batch_requests"].write_text("\n".join(requests) + ("\n" if requests else ""), encoding="utf-8")
@@ -1830,6 +2673,7 @@ def cmd_run_qa_batch(args: argparse.Namespace) -> None:
             "requests": len(requests),
             "qa_batch_requests_path": str(paths["qa_batch_requests"]),
             "qa_batch_map_path": str(paths["qa_batch_map"]),
+            "qa_scope": qa_scope,
         },
     )
     print(
@@ -1863,7 +2707,17 @@ def cmd_translate_direct(args: argparse.Namespace) -> None:
     progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
 
     chapter_list = [args.chapter] if args.chapter else visible_content_files(source_dir)
-    qa_feedback = load_qa_feedback(paths["qa_cloud"])
+    if should_use_qa_feedback(args):
+        qa_snapshot_path, qa_snapshot_meta, qa_feedback = resolve_qa_snapshot(
+            project_dir,
+            chapter_list,
+            explicit_snapshot=args.qa_snapshot,
+            allow_partial_retry=args.allow_partial_qa_retry,
+        )
+    else:
+        qa_snapshot_path = paths["qa_cloud"]
+        qa_snapshot_meta = {"scope_type": "disabled", "hrefs": [], "chapter_count": 0, "chunk_count": 0}
+        qa_feedback = {}
     retry_only_high = args.retry_only_high
     remaining_budget = args.max_chunks
     translated_summary = []
@@ -1883,7 +2737,10 @@ def cmd_translate_direct(args: argparse.Namespace) -> None:
                 if should_translate_chunk(idx, completed_set, qa_feedback_for_file, retry_only_high=retry_only_high)
             ]
         )
-    log(f"[translate-direct] Starting. Chunks selected in scope: {total_selected}")
+    log(
+        f"[translate-direct] Starting. Chunks selected in scope: {total_selected} "
+        f"(qa_scope={qa_snapshot_meta.get('scope_type')}, qa_snapshot={qa_snapshot_path})"
+    )
     processed_count = 0
 
     for href in chapter_list:
@@ -1932,6 +2789,7 @@ def cmd_translate_direct(args: argparse.Namespace) -> None:
                 "input": build_chunk_payload(
                     chunk,
                     glossary,
+                    config["translation"].get("source_language", "fr"),
                     config["translation"].get("target_language", "en"),
                     qa_feedback_text=qa_feedback_text,
                     strong_formatting_retry=strong_formatting_retry,
@@ -1940,7 +2798,7 @@ def cmd_translate_direct(args: argparse.Namespace) -> None:
             temperature = config["openai"].get("temperature")
             if config["openai"].get("send_temperature", True) and temperature is not None:
                 body["temperature"] = temperature
-            reasoning_effort = config["openai"].get("reasoning_effort")
+            reasoning_effort = reasoned_effort_for_mode(config, "targeted_retry" if qa_feedback_text else "draft")
             if reasoning_effort:
                 body["reasoning"] = {"effort": reasoning_effort}
             response = post_openai_responses(api_key, body)
@@ -1993,6 +2851,485 @@ def cmd_translate_direct(args: argparse.Namespace) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def cmd_validate_local(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    paths = project_paths(project_dir)
+    max_chars = args.max_chars or config["translation"]["max_chars_per_chunk"]
+    selected_files = [args.chapter] if args.chapter else visible_content_files(paths["source_dir"])
+    source_language = config["translation"].get("source_language", "fr")
+    target_language = config["translation"].get("target_language", "en")
+    marker_tokens = source_language_profile(source_language).get("markers", set())
+    report_lines = ["# Local QA", "", f"Project: `{project_dir.name}`", "", "## Findings", ""]
+    finding_count = 0
+    checked_chunks = 0
+
+    progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
+    for href in selected_files:
+        source_file = paths["source_dir"] / href
+        if not source_file.exists():
+            continue
+        _, source_units = collect_text_units(source_file)
+        translated_lookup = progress_lookup_for_href(progress, href)
+        chunks = chunk_units(source_units, max_chars)
+        for chunk_index, chunk in enumerate(chunks):
+            checked_chunks += 1
+            issues: List[Dict[str, str]] = []
+            for unit in chunk:
+                source_text = unit.plain_text
+                translation_text = render_unit_translation(unit, translated_lookup)
+                if any("[[SEG_" in translated_lookup.get((target.xpath, target.field), "") for target in unit.targets):
+                    issues.append(
+                        {
+                            "severity": "high",
+                            "category": "formatting",
+                            "source_excerpt": source_text,
+                            "translation_excerpt": translation_text,
+                            "note": "Unresolved placeholder token leaked into the translated XHTML.",
+                        }
+                    )
+                mapped = structural_translation(source_text, source_language, target_language)
+                if mapped and normalize_space(translation_text) and normalize_space(translation_text) != normalize_space(mapped):
+                    issues.append(
+                        {
+                            "severity": "medium",
+                            "category": "accuracy",
+                            "source_excerpt": source_text,
+                            "translation_excerpt": translation_text,
+                            "note": "Structural/nav label differs from deterministic local translation mapping.",
+                        }
+                    )
+                lowered = f" {translation_text.lower()} "
+                if marker_tokens and sum(marker in lowered for marker in marker_tokens) >= 3:
+                    issues.append(
+                        {
+                            "severity": "medium",
+                            "category": "leftover_french",
+                            "source_excerpt": source_text,
+                            "translation_excerpt": translation_text,
+                            "note": f"{source_language_name(source_language)} marker heuristic suggests untranslated source text remains in the target text.",
+                        }
+                    )
+                if has_obvious_number_mismatch(source_text, translation_text):
+                    severity = "high" if any(len(token) == 4 for token in extract_number_tokens(source_text)) else "medium"
+                    issues.append(
+                        {
+                            "severity": severity,
+                            "category": "accuracy",
+                            "source_excerpt": source_text,
+                            "translation_excerpt": translation_text,
+                            "note": "Source and translation contain different number/year tokens.",
+                        }
+                    )
+                if re.search(r"\s+[,.!?;:]", translation_text) or re.search(r"[A-Za-zÀ-ÿ]{6,}[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÿ]+", translation_text):
+                    issues.append(
+                        {
+                            "severity": "medium",
+                            "category": "formatting",
+                            "source_excerpt": source_text,
+                            "translation_excerpt": translation_text,
+                            "note": "Local typography/spacing heuristic detected likely text damage.",
+                        }
+                    )
+            if not issues:
+                continue
+            finding_count += len(issues)
+            report_lines.append(f"### {href} chunk {chunk_index}")
+            report_lines.append("- summary: Local deterministic checks found repairable risks.")
+            for issue in issues:
+                report_lines.append(f"- `{issue['severity']}` `{issue['category']}`: {issue['note']}")
+                report_lines.append(f"- source: {issue['source_excerpt']}")
+                report_lines.append(f"- translation: {issue['translation_excerpt']}")
+            report_lines.append("")
+
+    if finding_count == 0:
+        report_lines.append("No issues detected by local validators.")
+        report_lines.append("")
+    report_lines.extend(["## Summary", f"- checked_chunks: `{checked_chunks}`", f"- findings: `{finding_count}`"])
+    paths["qa_local"].write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "checked_chunks": checked_chunks,
+                "findings": finding_count,
+                "qa_local_report": str(paths["qa_local"]),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def cmd_build_remediation_plan(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    paths = project_paths(project_dir)
+    snapshot_path, snapshot_meta = resolve_snapshot_for_manifest(project_dir, explicit_snapshot=args.qa_snapshot)
+    manifest = build_remediation_manifest(project_dir, config, snapshot_path, snapshot_meta)
+    output_path = Path(args.output) if args.output else paths["remediation_plan"]
+    save_remediation_plan(output_path, manifest)
+    append_iteration_event(
+        project_dir,
+        "remediation_plan_built",
+        {
+            "plan_path": str(output_path),
+            "qa_snapshot": manifest["qa_snapshot"],
+            "selected_high_chunks": manifest["summary"]["selected_high_chunks"],
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "plan_path": str(output_path),
+                "selected_high_chunks": manifest["summary"]["selected_high_chunks"],
+                "local_chunks": manifest["summary"]["local_chunks"],
+                "model_chunks": manifest["summary"]["model_chunks"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def cmd_apply_local_fixes(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    paths = project_paths(project_dir)
+    manifest_path = Path(args.plan) if args.plan else paths["remediation_plan"]
+    manifest = load_remediation_plan(manifest_path)
+    verify_frozen_snapshot(manifest)
+    progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
+    max_chars = config["translation"]["max_chars_per_chunk"]
+    target_language = config["translation"].get("target_language", "en")
+    changed_files: List[Path] = []
+    changed_chunk_keys: List[str] = []
+
+    for chunk_entry in manifest.get("chunks", []):
+        local_issues = [issue for issue in chunk_entry.get("issues", []) if issue.get("fix_mode") == "local"]
+        if not local_issues:
+            chunk_entry["local_status"] = "not_applicable"
+            continue
+        translated_lookup = progress_lookup_for_href(progress, chunk_entry["href"])
+        chunk = load_chunk_from_source(paths, chunk_entry["href"], chunk_entry["chunk_index"], max_chars)
+        chunk_changed = False
+        for unit in chunk:
+            current_text = render_unit_translation_with_placeholders(unit, translated_lookup)
+            updated_text = apply_local_fixes_to_unit(unit, current_text, local_issues, source_language, target_language)
+            if updated_text == current_text:
+                continue
+            split_parts = split_translated_text(unit, normalize_translation_text(updated_text))
+            for target, piece in zip(unit.targets, split_parts):
+                translated_lookup[(target.xpath, target.field)] = piece
+            chunk_changed = True
+        if chunk_changed:
+            target_file = save_translated_lookup_for_href(paths, progress, chunk_entry["href"], translated_lookup)
+            changed_files.append(target_file)
+            changed_chunk_keys.append(chunk_entry["chunk_key"])
+            chunk_entry["changed"] = True
+            chunk_entry["local_status"] = "applied"
+        else:
+            chunk_entry["local_status"] = "noop"
+
+    save_json(paths["progress"], progress)
+    if changed_files:
+        normalize_translated_package(paths["translated_dir"], target_language)
+        sync_navigation_documents(paths["translated_dir"])
+        rezip_epub(paths["translated_dir"], paths["output_epub"])
+    save_remediation_plan(manifest_path, manifest)
+    append_iteration_event(
+        project_dir,
+        "local_fixes_applied",
+        {
+            "plan_path": str(manifest_path),
+            "changed_chunks": len(changed_chunk_keys),
+            "changed_files": len({str(path) for path in changed_files}),
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "plan_path": str(manifest_path),
+                "changed_chunks": changed_chunk_keys,
+                "changed_files": len({str(path) for path in changed_files}),
+                "output_epub": str(paths["output_epub"]),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def cmd_retry_targeted(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+    paths = project_paths(project_dir)
+    manifest_path = Path(args.plan) if args.plan else paths["remediation_plan"]
+    manifest = load_remediation_plan(manifest_path)
+    verify_frozen_snapshot(manifest)
+    if manifest.get("targeted_retry_rounds", 0) >= 1:
+        raise RuntimeError("Targeted retry already executed once for this remediation plan. Build a new plan before retrying again.")
+    model = config["openai"].get("model")
+    if not model:
+        raise RuntimeError("Set a model first with configure-openai.")
+
+    progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
+    glossary = load_glossary(paths["glossary"])
+    max_chars = config["translation"]["max_chars_per_chunk"]
+    max_chunks = args.max_chunks or manifest.get("targeted_retry_max_chunks") or config["pipeline"]["targeted_retry_max_chunks"]
+    selected = []
+    for chunk_entry in manifest.get("chunks", []):
+        model_issues = [issue for issue in chunk_entry.get("issues", []) if issue.get("fix_mode") == "model"]
+        if not model_issues:
+            chunk_entry["model_status"] = "not_applicable"
+            continue
+        if chunk_entry.get("model_status") not in {"pending", "noop"}:
+            continue
+        failed_key = f"{project_dir.name}:{chunk_entry['href']}:chunk:{chunk_entry['chunk_index']:04d}"
+        failed_entry = progress.get("failed", {}).get(failed_key)
+        if failed_entry and failed_entry.get("reason") == "apply_validation_failed":
+            chunk_entry["model_status"] = "blocked"
+            chunk_entry["last_error"] = "Blocked by previous placeholder validation failure."
+            continue
+        selected.append(chunk_entry)
+        if len(selected) >= max_chunks:
+            break
+
+    estimated_input_chars = 0
+    estimated_output_chars = 0
+    for chunk_entry in selected:
+        chunk = load_chunk_from_source(paths, chunk_entry["href"], chunk_entry["chunk_index"], max_chars)
+        estimated_input_chars += sum(len(unit.text) for unit in chunk) + 1200
+        estimated_output_chars += sum(len(unit.plain_text) for unit in chunk)
+    estimated_cost = estimate_direct_request_cost(model, estimated_input_chars, estimated_output_chars)
+    if manifest.get("estimated_spend_usd", 0.0) + estimated_cost > float(manifest.get("api_budget_usd", config["pipeline"]["api_budget_usd"])):
+        manifest["stop_loss_triggered"] = "budget_exceeded"
+        save_remediation_plan(manifest_path, manifest)
+        raise RuntimeError(
+            f"Estimated targeted retry cost ${estimated_cost:.4f} would exceed the remediation budget."
+        )
+
+    changed_files: List[Path] = []
+    retried_chunks: List[str] = []
+    source_language = config["translation"].get("source_language", "fr")
+    target_language = config["translation"].get("target_language", "en")
+    for chunk_entry in selected:
+        translated_lookup = progress_lookup_for_href(progress, chunk_entry["href"])
+        chunk = load_chunk_from_source(paths, chunk_entry["href"], chunk_entry["chunk_index"], max_chars)
+        chunk_feedback = {
+            "summary": chunk_entry.get("summary") or "Targeted retry",
+            "issues": [issue for issue in chunk_entry.get("issues", []) if issue.get("fix_mode") == "model"],
+        }
+        body = {
+            "model": model,
+            "input": build_chunk_payload(
+                chunk,
+                glossary,
+                source_language,
+                target_language,
+                qa_feedback_text=build_qa_feedback_text(chunk_feedback),
+                strong_formatting_retry=chunk_has_high_formatting_issue(chunk_feedback),
+            ),
+        }
+        temperature = config["openai"].get("temperature")
+        if config["openai"].get("send_temperature", True) and temperature is not None:
+            body["temperature"] = temperature
+        reasoning_effort = reasoned_effort_for_mode(config, "targeted_retry")
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
+        response = post_openai_responses(api_key, body)
+        output_text = detect_output_text(response)
+        translations = extract_translations_from_response(output_text, expected_count=len(chunk))
+        try:
+            for unit, translated_text in zip(chunk, translations):
+                split_parts = split_translated_text(unit, normalize_translation_text(translated_text))
+                for target, piece in zip(unit.targets, split_parts):
+                    translated_lookup[(target.xpath, target.field)] = piece
+        except RuntimeError as exc:
+            chunk_entry["model_status"] = "blocked"
+            chunk_entry["last_error"] = str(exc)
+            manifest["stop_loss_triggered"] = "placeholder_failure"
+            save_remediation_plan(manifest_path, manifest)
+            raise
+        target_file = save_translated_lookup_for_href(paths, progress, chunk_entry["href"], translated_lookup)
+        changed_files.append(target_file)
+        retried_chunks.append(chunk_entry["chunk_key"])
+        chunk_entry["changed"] = True
+        chunk_entry["model_status"] = "applied"
+        chunk_entry["last_error"] = None
+        progress["completed"].setdefault(chunk_entry["href"], [])
+        if chunk_entry["chunk_index"] not in progress["completed"][chunk_entry["href"]]:
+            progress["completed"][chunk_entry["href"]].append(chunk_entry["chunk_index"])
+
+    manifest["targeted_retry_rounds"] = manifest.get("targeted_retry_rounds", 0) + (1 if retried_chunks else 0)
+    manifest["estimated_spend_usd"] = round(manifest.get("estimated_spend_usd", 0.0) + estimated_cost, 4)
+    save_json(paths["progress"], progress)
+    if changed_files:
+        normalize_translated_package(paths["translated_dir"], target_language)
+        sync_navigation_documents(paths["translated_dir"])
+        rezip_epub(paths["translated_dir"], paths["output_epub"])
+    save_remediation_plan(manifest_path, manifest)
+    append_iteration_event(
+        project_dir,
+        "targeted_retry_applied",
+        {
+            "plan_path": str(manifest_path),
+            "retried_chunks": len(retried_chunks),
+            "estimated_cost_usd": round(estimated_cost, 4),
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "plan_path": str(manifest_path),
+                "retried_chunks": retried_chunks,
+                "estimated_cost_usd": round(estimated_cost, 4),
+                "output_epub": str(paths["output_epub"]),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def cmd_qa_changed(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+    paths = project_paths(project_dir)
+    manifest_path = Path(args.plan) if args.plan else paths["remediation_plan"]
+    manifest = load_remediation_plan(manifest_path)
+    verify_frozen_snapshot(manifest)
+    model = config["openai"].get("model")
+    if not model:
+        raise RuntimeError("Set a model first with configure-openai.")
+    max_chars = config["translation"]["max_chars_per_chunk"]
+    progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
+    target_language = config["translation"].get("target_language", "en")
+
+    report_lines = ["# Changed-Chunks QA", "", f"Project: `{project_dir.name}`", "", "## Findings", ""]
+    checked_chunks = 0
+    all_issues: List[Dict] = []
+    remaining_high_chunks: List[str] = []
+    for chunk_entry in manifest.get("chunks", []):
+        chunk = load_chunk_from_source(paths, chunk_entry["href"], chunk_entry["chunk_index"], max_chars)
+        translated_lookup = progress_lookup_for_href(progress, chunk_entry["href"])
+        pairs = qa_pairs_for_chunk(chunk, translated_lookup)
+        body = {
+            "model": model,
+            "input": build_qa_payload(
+                pairs,
+                config["translation"].get("source_language", "fr"),
+                target_language,
+            ),
+        }
+        reasoning_effort = reasoned_effort_for_mode(config, "qa")
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
+        response = post_openai_responses(api_key, body)
+        data = extract_json_object_from_response(detect_output_text(response))
+        issues = annotate_qa_issues_for_gate(data.get("issues") or [])
+        summary = data.get("summary") or "No summary."
+        checked_chunks += 1
+        has_blocking_high = any(qa_issue_effective_severity(issue) == "high" for issue in issues)
+        chunk_entry["qa_changed_status"] = "passed" if not has_blocking_high else "failed"
+        chunk_entry["qa_changed_issues"] = issues
+        if has_blocking_high:
+            remaining_high_chunks.append(chunk_entry["chunk_key"])
+        if issues:
+            report_lines.append(f"### {chunk_entry['href']} chunk {chunk_entry['chunk_index']}")
+            report_lines.append(f"- summary: {summary}")
+            for issue in issues:
+                report_lines.append(f"- `{issue.get('severity', 'unknown')}` `{issue.get('category', 'unknown')}`: {issue.get('note', '').strip()}")
+                effective_severity = qa_issue_effective_severity(issue)
+                if effective_severity != issue.get("severity", "unknown"):
+                    report_lines.append(
+                        f"- gate: treated as `{effective_severity}` for final gate ({issue.get('gate_reason', 'gate_adjusted')})"
+                    )
+                report_lines.append(f"- source: {normalize_space(issue.get('source_excerpt', ''))}")
+                report_lines.append(f"- translation: {normalize_space(issue.get('translation_excerpt', ''))}")
+                all_issues.append(issue)
+            report_lines.append("")
+
+    if not all_issues:
+        report_lines.append("No issues detected in changed-chunks QA.")
+        report_lines.append("")
+
+    counts = qa_counts_from_issue_list(all_issues)
+    report_lines.extend(
+        [
+            "## Summary",
+            f"- checked_chunks: `{checked_chunks}`",
+            f"- high: `{counts['high']}`",
+            f"- medium: `{counts['medium']}`",
+            f"- low: `{counts['low']}`",
+        ]
+    )
+    paths["qa_changed"].write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    baseline_high = manifest.get("summary", {}).get("baseline_counts", {}).get("high", 0)
+    manifest["qa_changed"] = {
+        "checked_chunks": checked_chunks,
+        "counts": counts,
+        "report_path": str(paths["qa_changed"]),
+        "remaining_high_chunks": remaining_high_chunks,
+        "ran_at": utc_now_iso(),
+    }
+    if manifest.get("targeted_retry_rounds", 0) >= 1 and counts["high"] >= baseline_high:
+        manifest["stop_loss_triggered"] = "unchanged_high_after_retry"
+    save_remediation_plan(manifest_path, manifest)
+    append_iteration_event(
+        project_dir,
+        "qa_changed_completed",
+        {
+            "plan_path": str(manifest_path),
+            "checked_chunks": checked_chunks,
+            "counts": counts,
+            "remaining_high_chunks": remaining_high_chunks,
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "checked_chunks": checked_chunks,
+                "counts": counts,
+                "remaining_high_chunks": remaining_high_chunks,
+                "qa_changed_report": str(paths["qa_changed"]),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def cmd_final_gate(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    paths = project_paths(project_dir)
+    manifest_path = Path(args.plan) if args.plan else paths["remediation_plan"]
+    manifest = load_remediation_plan(manifest_path)
+    qa_changed = manifest.get("qa_changed")
+    if not qa_changed:
+        raise RuntimeError("Changed-chunks QA has not been run for this remediation plan yet.")
+    max_high = manifest.get("quality_gate", {}).get("max_high", 0)
+    high_count = qa_changed.get("counts", {}).get("high", 0)
+    stop_loss = manifest.get("stop_loss_triggered")
+    status = "PASS" if high_count <= max_high and not stop_loss else "FAIL"
+    result = {
+        "status": status,
+        "max_high": max_high,
+        "high": high_count,
+        "medium": qa_changed.get("counts", {}).get("medium", 0),
+        "low": qa_changed.get("counts", {}).get("low", 0),
+        "remaining_high_chunks": qa_changed.get("remaining_high_chunks", []),
+        "stop_loss_triggered": stop_loss,
+        "qa_changed_report": qa_changed.get("report_path"),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def upload_batch_file(api_key: str, batch_requests: Path) -> str:
     boundary = "----codexbatchboundary"
     file_bytes = batch_requests.read_bytes()
@@ -2025,6 +3362,7 @@ def cmd_submit_batch(args: argparse.Namespace) -> None:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set.")
     paths = project_paths(project_dir)
+    batch_map = load_json(paths["batch_map"], {"requests": []})
     input_file_id = upload_batch_file(api_key, paths["batch_requests"])
     payload = json.dumps(
         {
@@ -2062,7 +3400,7 @@ def cmd_submit_batch(args: argparse.Namespace) -> None:
             "strong_formatting_retries": None,
             "batch_requests_path": str(paths["batch_requests"]),
             "batch_map_path": str(paths["batch_map"]),
-            "qa_snapshot": qa_snapshot_metadata(paths),
+            "qa_snapshot": batch_map.get("qa_snapshot_meta") or qa_snapshot_metadata(paths),
         },
     )
     print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -2181,6 +3519,7 @@ def cmd_apply_batch_output(args: argparse.Namespace) -> None:
         outputs[item["custom_id"]] = item
 
     changed_files: List[Path] = []
+    skipped_requests: List[Dict[str, str]] = []
     for request in batch_map["requests"]:
         custom_id = request["custom_id"]
         if custom_id not in outputs:
@@ -2197,10 +3536,32 @@ def cmd_apply_batch_output(args: argparse.Namespace) -> None:
             tuple(key.split("::", 1)): value
             for key, value in progress["translations"].get(href, {}).items()
         }
+        request_failed = False
         for unit, translated_text in zip(units, translations):
-            split_parts = split_translated_text(unit, normalize_translation_text(translated_text))
+            try:
+                split_parts = split_translated_text(unit, normalize_translation_text(translated_text))
+            except RuntimeError as exc:
+                skipped_requests.append(
+                    {
+                        "custom_id": custom_id,
+                        "href": href,
+                        "chunk_index": str(request["chunk_index"]),
+                        "xpath": unit.xpath,
+                        "reason": str(exc),
+                    }
+                )
+                request_failed = True
+                break
             for target, piece in zip(unit.targets, split_parts):
                 translated_map[(target.xpath, target.field)] = piece
+        if request_failed:
+            progress["failed"][custom_id] = {
+                "reason": "apply_validation_failed",
+                "href": href,
+                "chunk_index": request["chunk_index"],
+                "detail": skipped_requests[-1]["reason"],
+            }
+            continue
         progress["translations"][href] = {
             f"{xpath}::{field}": value for (xpath, field), value in translated_map.items()
         }
@@ -2222,7 +3583,12 @@ def cmd_apply_batch_output(args: argparse.Namespace) -> None:
     if args.skip_qa:
         run_qa = False
     if run_qa:
-        generate_qa_report(changed_files, load_glossary(paths["glossary"]), paths["qa"])
+        generate_qa_report(
+            changed_files,
+            load_glossary(paths["glossary"]),
+            paths["qa"],
+            config["translation"].get("source_language", "fr"),
+        )
     batch_state = load_json(project_dir / "batches" / "last_batch.json", {})
     append_iteration_event(
         project_dir,
@@ -2231,6 +3597,7 @@ def cmd_apply_batch_output(args: argparse.Namespace) -> None:
             "batch_id": batch_state.get("id"),
             "output_file_id": batch_state.get("output_file_id"),
             "updated_files": len(changed_files),
+            "skipped_requests": len(skipped_requests),
             "output_epub": str(paths["output_epub"]),
             "batch_output_path": str(output_path),
             "qa_ran": run_qa,
@@ -2241,6 +3608,7 @@ def cmd_apply_batch_output(args: argparse.Namespace) -> None:
         json.dumps(
             {
                 "updated_files": len(changed_files),
+                "skipped_requests": skipped_requests,
                 "output_epub": str(paths["output_epub"]),
                 "qa_ran": run_qa,
             },
@@ -2324,6 +3692,16 @@ def cmd_apply_qa_output(args: argparse.Namespace) -> None:
     history_filename = build_qa_history_filename(batch_map.get("requests", []))
     history_path = unique_path(paths["qa_cloud_history"] / history_filename)
     history_path.write_text(report_text, encoding="utf-8")
+    active_snapshot = register_qa_snapshot(
+        project_dir,
+        history_path,
+        batch_map.get("requests", []),
+        checked_chunks=checked_chunks,
+        findings=finding_count,
+        failed_chunks=failed_chunks,
+        scope_override=batch_map.get("qa_scope"),
+        make_active=True,
+    )
     qa_batch_state = load_json(paths["qa_last_batch"], {})
     append_iteration_event(
         project_dir,
@@ -2336,7 +3714,7 @@ def cmd_apply_qa_output(args: argparse.Namespace) -> None:
             "failed_chunks": failed_chunks,
             "qa_report": str(paths["qa_cloud"]),
             "qa_history_snapshot": str(history_path),
-            "qa_snapshot": qa_snapshot_metadata(paths),
+            "qa_snapshot": active_snapshot,
         },
     )
     print(
@@ -2361,6 +3739,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init-project", help="Create a per-book project workspace.")
     init_parser.add_argument("--epub", required=True)
     init_parser.add_argument("--project")
+    init_parser.add_argument("--source-language", default="fr")
     init_parser.add_argument("--target-language", default="en")
     init_parser.add_argument("--project-root", default="projects")
     init_parser.add_argument("--force", action="store_true")
@@ -2375,6 +3754,8 @@ def build_parser() -> argparse.ArgumentParser:
     configure_parser = subparsers.add_parser("configure-openai", help="Set the model and OpenAI translation parameters.")
     configure_parser.add_argument("--project", required=True)
     configure_parser.add_argument("--project-root", default="projects")
+    configure_parser.add_argument("--source-language")
+    configure_parser.add_argument("--target-language")
     configure_parser.add_argument("--model")
     configure_parser.add_argument("--temperature", type=float)
     configure_parser.add_argument("--send-temperature", action=argparse.BooleanOptionalAction, default=None)
@@ -2382,6 +3763,26 @@ def build_parser() -> argparse.ArgumentParser:
     configure_parser.add_argument("--use-batch", action=argparse.BooleanOptionalAction, default=None)
     configure_parser.add_argument("--run-qa-after-apply", action=argparse.BooleanOptionalAction, default=None)
     configure_parser.set_defaults(func=cmd_configure_openai)
+
+    draft_parser = subparsers.add_parser("draft", help="Run the default first-pass translation flow for one chapter or the whole book.")
+    draft_parser.add_argument("--project", required=True)
+    draft_parser.add_argument("--project-root", default="projects")
+    draft_parser.add_argument("--chapter")
+    draft_parser.add_argument("--max-chars", type=int)
+    draft_parser.add_argument("--max-chunks", type=int, help="Only used when the project is configured for direct mode.")
+    draft_parser.set_defaults(func=cmd_draft)
+
+    review_parser = subparsers.add_parser("review", help="Run cheap local validation only.")
+    review_parser.add_argument("--project", required=True)
+    review_parser.add_argument("--project-root", default="projects")
+    review_parser.add_argument("--chapter")
+    review_parser.add_argument("--max-chars", type=int)
+    review_parser.set_defaults(func=cmd_review)
+
+    finalize_parser = subparsers.add_parser("finalize", help="Normalize translated files, sync navigation, and build the output EPUB.")
+    finalize_parser.add_argument("--project", required=True)
+    finalize_parser.add_argument("--project-root", default="projects")
+    finalize_parser.set_defaults(func=cmd_finalize)
 
     estimate_parser = subparsers.add_parser("estimate-cost", help="Estimate translation cost for a configured project.")
     estimate_parser.add_argument("--project", required=True)
@@ -2402,6 +3803,13 @@ def build_parser() -> argparse.ArgumentParser:
     glossary_parser.add_argument("--max-candidates", type=int, default=80)
     glossary_parser.set_defaults(func=cmd_suggest_glossary)
 
+    local_validate_parser = subparsers.add_parser("validate-local", help="Run deterministic local validation before cloud QA.")
+    local_validate_parser.add_argument("--project", required=True)
+    local_validate_parser.add_argument("--project-root", default="projects")
+    local_validate_parser.add_argument("--chapter")
+    local_validate_parser.add_argument("--max-chars", type=int)
+    local_validate_parser.set_defaults(func=cmd_validate_local)
+
     qa_estimate_parser = subparsers.add_parser("estimate-qa-cost", help="Estimate cloud QA cost for a configured translated project.")
     qa_estimate_parser.add_argument("--project", required=True)
     qa_estimate_parser.add_argument("--project-root", default="projects")
@@ -2415,7 +3823,10 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--project-root", default="projects")
     prepare_parser.add_argument("--chapter")
     prepare_parser.add_argument("--max-chars", type=int)
+    prepare_parser.add_argument("--reuse-qa-feedback", action="store_true", help="Reuse the frozen QA snapshot for retry preparation. Disabled by default for safe draft runs.")
     prepare_parser.add_argument("--retry-only-high", action="store_true", help="When reusing QA_cloud feedback, retry only chunks with at least one high-severity QA issue.")
+    prepare_parser.add_argument("--qa-snapshot", help="Optional QA markdown snapshot to use instead of the active QA state.")
+    prepare_parser.add_argument("--allow-partial-qa-retry", action="store_true", help="Allow a whole-book retry even when the selected QA snapshot covers only part of the book.")
     prepare_parser.set_defaults(func=cmd_prepare_batch)
 
     qa_prepare_parser = subparsers.add_parser("prepare-qa-batch", help="Generate JSONL requests for OpenAI Batch QA.")
@@ -2430,7 +3841,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_batch_parser.add_argument("--project-root", default="projects")
     run_batch_parser.add_argument("--chapter")
     run_batch_parser.add_argument("--max-chars", type=int)
+    run_batch_parser.add_argument("--reuse-qa-feedback", action="store_true", help="Reuse the frozen QA snapshot for retry submission. Disabled by default for safe draft runs.")
     run_batch_parser.add_argument("--retry-only-high", action="store_true", help="When reusing QA_cloud feedback, retry only chunks with at least one high-severity QA issue.")
+    run_batch_parser.add_argument("--qa-snapshot", help="Optional QA markdown snapshot to use instead of the active QA state.")
+    run_batch_parser.add_argument("--allow-partial-qa-retry", action="store_true", help="Allow a whole-book retry even when the selected QA snapshot covers only part of the book.")
     run_batch_parser.set_defaults(func=cmd_run_batch)
 
     run_qa_batch_parser = subparsers.add_parser("run-qa-batch", help="Prepare and submit a cloud QA batch for all translated chunks or one chapter.")
@@ -2482,13 +3896,48 @@ def build_parser() -> argparse.ArgumentParser:
     qa_apply_parser.add_argument("--batch-output")
     qa_apply_parser.set_defaults(func=cmd_apply_qa_output)
 
+    remediation_parser = subparsers.add_parser("build-remediation-plan", help="Build a deterministic remediation manifest from a frozen QA snapshot.")
+    remediation_parser.add_argument("--project", required=True)
+    remediation_parser.add_argument("--project-root", default="projects")
+    remediation_parser.add_argument("--qa-snapshot")
+    remediation_parser.add_argument("--output")
+    remediation_parser.set_defaults(func=cmd_build_remediation_plan)
+
+    local_fix_parser = subparsers.add_parser("apply-local-fixes", help="Apply deterministic local fixes described by a remediation plan.")
+    local_fix_parser.add_argument("--project", required=True)
+    local_fix_parser.add_argument("--project-root", default="projects")
+    local_fix_parser.add_argument("--plan")
+    local_fix_parser.set_defaults(func=cmd_apply_local_fixes)
+
+    targeted_retry_parser = subparsers.add_parser("retry-targeted", help="Retry only model-fix chunks from a remediation plan.")
+    targeted_retry_parser.add_argument("--project", required=True)
+    targeted_retry_parser.add_argument("--project-root", default="projects")
+    targeted_retry_parser.add_argument("--plan")
+    targeted_retry_parser.add_argument("--max-chunks", type=int)
+    targeted_retry_parser.set_defaults(func=cmd_retry_targeted)
+
+    qa_changed_parser = subparsers.add_parser("qa-changed", help="Run QA only for chunks tracked by a remediation plan.")
+    qa_changed_parser.add_argument("--project", required=True)
+    qa_changed_parser.add_argument("--project-root", default="projects")
+    qa_changed_parser.add_argument("--plan")
+    qa_changed_parser.set_defaults(func=cmd_qa_changed)
+
+    final_gate_parser = subparsers.add_parser("final-gate", help="Evaluate the final quality gate for a remediation plan.")
+    final_gate_parser.add_argument("--project", required=True)
+    final_gate_parser.add_argument("--project-root", default="projects")
+    final_gate_parser.add_argument("--plan")
+    final_gate_parser.set_defaults(func=cmd_final_gate)
+
     direct_parser = subparsers.add_parser("translate-direct", help="Translate chunks directly via Responses API, for one chapter or the whole book.")
     direct_parser.add_argument("--project", required=True)
     direct_parser.add_argument("--project-root", default="projects")
     direct_parser.add_argument("--chapter")
     direct_parser.add_argument("--max-chunks", type=int, help="Optional global limit for testing. If omitted, translate all remaining chunks.")
     direct_parser.add_argument("--max-chars", type=int)
+    direct_parser.add_argument("--reuse-qa-feedback", action="store_true", help="Reuse the frozen QA snapshot for retry translation. Disabled by default for safe draft runs.")
     direct_parser.add_argument("--retry-only-high", action="store_true", help="When reusing QA_cloud feedback, retry only chunks with at least one high-severity QA issue.")
+    direct_parser.add_argument("--qa-snapshot", help="Optional QA markdown snapshot to use instead of the active QA state.")
+    direct_parser.add_argument("--allow-partial-qa-retry", action="store_true", help="Allow a whole-book retry even when the selected QA snapshot covers only part of the book.")
     direct_parser.set_defaults(func=cmd_translate_direct)
     return parser
 

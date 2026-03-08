@@ -1,52 +1,57 @@
 # EPUB Translate Manual
 
-Narzędzie: `tools/epub_translate.py`
+Tool: `tools/epub_translate.py`
 
-Służy do bezpiecznego tłumaczenia EPUBów z zachowaniem struktury XHTML/HTML, postępu pracy i składania nowego pliku EPUB.
+This tool translates EPUB books while preserving XHTML structure, navigation files, anchors, notes, and packaging. It supports draft translation, cheap local review, cloud QA, deterministic remediation, and final EPUB assembly.
 
-## Wymagania
+## Requirements
 
 - Python 3.11+
-- ustawiony `OPENAI_API_KEY`
-- książka źródłowa w formacie `.epub`
+- `OPENAI_API_KEY` set in the shell
+- a source `.epub` file
 
 PowerShell:
 
 ```powershell
-$env:OPENAI_API_KEY="twoj_klucz"
+$env:OPENAI_API_KEY="your_key"
 ```
 
 CMD:
 
 ```cmd
-set OPENAI_API_KEY=twoj_klucz
+set OPENAI_API_KEY=your_key
 ```
 
-## Konwencja projektów
+## Project Convention
 
-Każda książka ma osobny projekt w `projects/`.
+Each book should live in its own project under `projects/`.
 
-Zalecenie:
+Examples:
 
-- angielski: `projects/<slug-ksiazki>/`
-- inne języki: `projects/<slug-ksiazki>-<kod-jezyka>/`
-
-Przykłady:
-
-- `projects/qu-est-ce-que-le-fascisme-maurice-bardeche`
+- `projects/my-book-en`
+- `projects/my-book-pl`
 - `projects/qu-est-ce-que-le-fascisme-maurice-bardeche-pl`
 
-To pozwala trzymać kilka wersji językowych tej samej książki obok siebie.
+## Recommended Workflow
 
-## Główne komendy
+The intended low-cost flow is:
 
-### 1. Inicjalizacja projektu
+1. `draft`
+2. `review`
+3. optional remediation on the flagged subset
+4. `finalize`
 
-```cmd
-python tools\epub_translate.py init-project --epub "Qu'est-ce que le fascisme _ - Maurice Bardeche.epub" --project-root projects --target-language pl
+Avoid repeated broad retry loops. Use cloud QA as a focused diagnostic step, not as the default loop for the whole book.
+
+## Core Commands
+
+### 1. Initialize a project
+
+```powershell
+python tools\epub_translate.py init-project --epub "book.epub" --project-root projects --source-language fr --target-language en
 ```
 
-Tworzy:
+This creates:
 
 - `project.json`
 - `glossary.md`
@@ -54,296 +59,207 @@ Tworzy:
 - `workspace/`
 - `batches/`
 
-### 2. Lista plików treści
+### 2. List content files
 
-```cmd
-python tools\epub_translate.py list-content --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py list-content --project my-book-en --project-root projects
 ```
 
-### 3. Konfiguracja OpenAI
+### 3. Configure model and project language settings
 
-```cmd
-python tools\epub_translate.py configure-openai --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --model gpt-5.4 --reasoning-effort none --use-batch
+```powershell
+python tools\epub_translate.py configure-openai --project my-book-en --project-root projects --model gpt-5.4 --reasoning-effort none --use-batch --source-language fr --target-language en
 ```
 
-Najważniejsze opcje:
+Important options:
 
 - `--model`
 - `--temperature`
 - `--reasoning-effort {none,low,medium,high}`
-- `--use-batch`
-- `--no-use-batch`
-- `--run-qa-after-apply`
-- `--no-run-qa-after-apply`
+- `--use-batch` / `--no-use-batch`
+- `--run-qa-after-apply` / `--no-run-qa-after-apply`
+- `--source-language`
+- `--target-language`
 
-Uwaga:
+### 4. Estimate translation cost
 
-- dla `gpt-5.4` zwykle warto mieć `--reasoning-effort none`
-- dla części modeli trzeba mieć `send_temperature=false`; skrypt obsługuje to w konfiguracji projektu
-
-### 4. Szacunek kosztu
-
-```cmd
-python tools\epub_translate.py estimate-cost --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py estimate-cost --project my-book-en --project-root projects
 ```
 
-To jest estymacja, nie gwarantowany koszt końcowy.
+### 5. Suggest glossary candidates
 
-### 5. Sugestie do glosariusza
-
-```cmd
-python tools\epub_translate.py suggest-glossary --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py suggest-glossary --project my-book-en --project-root projects
 ```
 
-Skrypt zapisze kandydatów do:
+Optional chapter scope:
 
-- `projects/<projekt>/glossary_suggestions.md`
-
-Opcjonalnie można ograniczyć zakres:
-
-```cmd
-python tools\epub_translate.py suggest-glossary --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --chapter OEBPS/e9782307290681_c01.xhtml --max-candidates 40
+```powershell
+python tools\epub_translate.py suggest-glossary --project my-book-en --project-root projects --chapter OEBPS/chapter01.xhtml --max-candidates 40
 ```
 
-### 6. Szacunek kosztu QA w chmurze
+## High-Level Commands
 
-```cmd
-python tools\epub_translate.py estimate-qa-cost --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+### `draft`
+
+Runs the default first-pass translation flow. If the project is configured for Batch API, it prepares and submits a batch. Otherwise it uses direct mode.
+
+```powershell
+python tools\epub_translate.py draft --project my-book-en --project-root projects
 ```
 
-To liczy lekki batch QA porównujący tekst źródłowy i tłumaczenie.
+Optional chapter scope:
 
-## Workflow batch
-
-To jest domyślny, najtańszy i najwygodniejszy tryb dla całej książki.
-
-### Jedna komenda: przygotowanie i wysłanie batcha
-
-Cała książka:
-
-```cmd
-python tools\epub_translate.py run-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py draft --project my-book-en --project-root projects --chapter OEBPS/chapter01.xhtml
 ```
 
-Jeden rozdział:
+### `review`
 
-```cmd
-python tools\epub_translate.py run-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --chapter OEBPS/e9782307290681_c01.xhtml
+Runs only deterministic local validation. This is the cheap first review layer.
+
+```powershell
+python tools\epub_translate.py review --project my-book-en --project-root projects
 ```
 
-Feedback loop z `QA_cloud.md`:
+Output is written to `QA_local.md`.
 
-- jeśli w `projects/<projekt>/QA_cloud.md` istnieją findings dla danego `chapter/chunk`, `run-batch` automatycznie wyśle te chunki ponownie, nawet jeśli są już oznaczone jako ukończone w `progress.json`
-- skrypt dołączy streszczenie i listę uwag QA do promptu retranslacji tego konkretnego chunku
-- tłumaczenie idzie teraz blokami akapitowymi z placeholderami `[[SEG_n]]`, więc model widzi cały akapit i ma odbudować naturalną składnię przy zachowaniu struktury inline
-- chunki z `high` + `formatting` dostają mocniejszy prompt retry, który każe odbudować składnię między segmentami
-- nie trzeba ręcznie czyścić `progress.json`, jeśli chcesz po prostu poprawić problematyczne chunki po cloud QA
+### `finalize`
 
-Typowy retry po QA, z zachowaniem chunk size `6400`:
+Normalizes translated package metadata, syncs navigation files, and rebuilds the output EPUB.
 
-```cmd
-python tools\epub_translate.py run-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --max-chars 6400
+```powershell
+python tools\epub_translate.py finalize --project my-book-en --project-root projects
 ```
 
-Tańszy retry tylko dla chunków z co najmniej jednym issue `high`:
+## Low-Level Translation Commands
 
-```cmd
-python tools\epub_translate.py run-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --max-chars 6400 --retry-only-high
+Use these when you need direct control over the pipeline.
+
+### Prepare translation batch
+
+```powershell
+python tools\epub_translate.py prepare-batch --project my-book-en --project-root projects
 ```
 
-Ten tryb nadal tłumaczy z oryginalnego EPUB źródłowego. `QA_cloud.md` działa wyłącznie jako warstwa feedbacku dla ponownego tłumaczenia.
+### Prepare and submit translation batch
 
-### Sprawdzanie statusu
-
-```cmd
-python tools\epub_translate.py batch-status --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py run-batch --project my-book-en --project-root projects
 ```
 
-### Historia iteracji QA i retry
+### Direct translation mode
 
-```cmd
-python tools\epub_translate.py iteration-status --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --limit 10
+```powershell
+python tools\epub_translate.py translate-direct --project my-book-en --project-root projects
 ```
 
-Skrypt zapisuje historię do:
+### Batch status / download / apply
 
-- `projects/<projekt>/iterations/history.jsonl`
-
-Log obejmuje m.in.:
-
-- wysłanie batcha QA
-- złożenie `QA_cloud.md`
-- wysłanie batcha retranslacji z feedbackiem
-- zastosowanie wyników retranslacji do EPUB
-
-Statusy typowe:
-
-- `validating`
-- `in_progress`
-- `finalizing`
-- `completed`
-- `failed`
-
-### Pobranie wyników
-
-```cmd
-python tools\epub_translate.py batch-download-output --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py batch-status --project my-book-en --project-root projects
+python tools\epub_translate.py batch-download-output --project my-book-en --project-root projects
+python tools\epub_translate.py apply-batch-output --project my-book-en --project-root projects --skip-qa
 ```
 
-### Zastosowanie wyników do EPUB
+## QA Commands
 
-```cmd
-python tools\epub_translate.py apply-batch-output --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --skip-qa
+### Local validation
+
+```powershell
+python tools\epub_translate.py validate-local --project my-book-en --project-root projects
 ```
 
-Po tym skrypt:
+### Estimate cloud QA cost
 
-- aktualizuje `progress.json`
-- wpisuje tłumaczenia do XHTML/HTML
-- składa nowy plik EPUB
-
-## Workflow cloud QA
-
-To jest osobny batch diagnostyczny. Nie zmienia EPUB, tylko generuje raport problemów.
-
-### Jedna komenda: przygotowanie i wysłanie QA batcha
-
-```cmd
-python tools\epub_translate.py run-qa-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py estimate-qa-cost --project my-book-en --project-root projects
 ```
 
-Jeden rozdział:
+### Cloud QA batch
 
-```cmd
-python tools\epub_translate.py run-qa-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --chapter OEBPS/e9782307290681_c01.xhtml
+```powershell
+python tools\epub_translate.py run-qa-batch --project my-book-en --project-root projects
+python tools\epub_translate.py qa-batch-status --project my-book-en --project-root projects
+python tools\epub_translate.py qa-batch-download-output --project my-book-en --project-root projects
+python tools\epub_translate.py apply-qa-output --project my-book-en --project-root projects
 ```
 
-### Status QA batcha
+Cloud QA writes:
 
-```cmd
-python tools\epub_translate.py qa-batch-status --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+- `QA_cloud.md`
+- `QA_cloud_history/YYYY-MM-DD_<scope>.md`
+
+## Remediation Commands
+
+These commands support the deterministic `draft -> QA -> final` flow without broad reruns.
+
+### Build a frozen remediation plan
+
+```powershell
+python tools\epub_translate.py build-remediation-plan --project my-book-en --project-root projects --qa-snapshot projects\my-book-en\QA_cloud_history\2026-03-08_full.md
 ```
 
-### Pobranie outputu QA
+### Apply local fixes
 
-```cmd
-python tools\epub_translate.py qa-batch-download-output --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py apply-local-fixes --project my-book-en --project-root projects
 ```
 
-### Złożenie raportu QA
+### Retry only model-fix chunks
 
-```cmd
-python tools\epub_translate.py apply-qa-output --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py retry-targeted --project my-book-en --project-root projects --max-chunks 5
 ```
 
-Wynik trafia do:
+### QA only changed chunks
 
-- `projects/<projekt>/QA_cloud.md`
-- najnowszy snapshot jest też odkładany do `projects/<projekt>/QA_cloud_history/YYYY-MM-DD_<scope>.md`
-
-Przykłady:
-
-- `projects/qu-est-ce-que-le-fascisme-maurice-bardeche-pl/QA_cloud_history/2026-03-08_c02.md`
-- `projects/qu-est-ce-que-le-fascisme-maurice-bardeche-pl/QA_cloud_history/2026-03-08_full.md`
-
-## Workflow direct
-
-Przydaje się do małych testów jakościowych.
-
-Jeden rozdział:
-
-```cmd
-python tools\epub_translate.py translate-direct --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --chapter OEBPS/e9782307290681_c01.xhtml
+```powershell
+python tools\epub_translate.py qa-changed --project my-book-en --project-root projects
 ```
 
-Cała książka:
+### Final gate
 
-```cmd
-python tools\epub_translate.py translate-direct --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```powershell
+python tools\epub_translate.py final-gate --project my-book-en --project-root projects
 ```
 
-Tryb direct:
+## Prompt Templates
 
-- robi zwykłe requesty do API
-- jest wygodny do testów
-- zwykle jest droższy niż batch
+Prompt bodies live outside Python in `prompts/`:
 
-## Postęp i wznowienie
+- `translation_system.txt`
+- `translation_user.txt`
+- `qa_system.txt`
+- `qa_user.txt`
 
-Stan zapisuje się w:
+If you want to tune behavior for public use, change these files first instead of editing prompt strings inside the script.
 
-- `projects/<projekt>/workspace/progress.json`
+## Output Files
 
-Jeśli proces padnie albo przerwiesz go `Ctrl+C`, można wznowić tą samą komendą.
+Typical important project files:
 
-## Chunk size
+- `project.json`
+- `glossary.md`
+- `glossary_suggestions.md`
+- `QA.md`
+- `QA_local.md`
+- `QA_cloud.md`
+- `QA_changed.md`
+- `remediation_plan.json`
+- `workspace/progress.json`
+- `<project>_<lang>.epub`
 
-Parametr projektu:
+## Notes for Public/Shared Use
 
-- `translation.max_chars_per_chunk`
+- `source_language` is configurable and should be set explicitly per project.
+- Batch mode is usually the cheapest default for full-book draft translation.
+- `reasoning_effort none` is a sensible default for draft and QA.
+- Targeted retries should stay small. Do not rerun the whole book unless you intentionally want a fresh draft.
 
-Praktycznie:
+## Tests
 
-- `3200` = bezpieczniej, ale więcej requestów
-- `6400` = taniej i zwykle lepiej dla batcha
-
-`max_chars_per_chunk` dotyczy tekstu książki, a nie całego requestu. Prompt i glosariusz są doliczane osobno.
-
-## Glosariusz
-
-Plik:
-
-- `projects/<projekt>/glossary.md`
-- `projects/<projekt>/glossary_suggestions.md`
-
-Wpisuj tam:
-
-- nazwiska
-- instytucje
-- miejsca
-- terminy historyczne i prawne
-
-Skrypt dołącza glosariusz do promptu.
-`suggest-glossary` generuje osobny plik kandydatów, żeby można było ręcznie przenieść tylko sensowne wpisy do właściwego `glossary.md`.
-
-## QA i cleanup
-
-Po tłumaczeniu warto zrobić dwa etapy:
-
-1. lokalny QA
-2. lokalny cleanup
-
-Lokalny QA sprawdza:
-
-- parsowanie XML/XHTML
-- resztki starego tytułu
-- stare referencje do okładki
-- podstawowe problemy metadanych
-
-Lokalny cleanup zwykle obejmuje:
-
-- `dc:title`
-- `<title>` w plikach XHTML
-- `toc.ncx`
-- `toc.xhtml`
-- `guide`/`reference` w `.opf`
-- podmianę okładki
-
-## Typowe pliki projektu
-
-- `project.json` — konfiguracja projektu
-- `glossary.md` — glosariusz
-- `glossary_suggestions.md` — kandydaci do glosariusza
-- `QA.md` — raport jakości
-- `workspace/unpacked/source/` — rozpakowany oryginał
-- `workspace/unpacked/translated/` — rozpakowana wersja robocza po tłumaczeniu
-- `workspace/progress.json` — postęp
-- `batches/requests.jsonl` — wejście batcha
-- `batches/output.jsonl` — odpowiedzi batcha
-
-## Uwagi praktyczne
-
-- batch kończy się szybko po stronie terminala, bo wysyła zadanie asynchroniczne do OpenAI
-- tłumaczenie nie dzieje się lokalnie; lokalna jest tylko obróbka EPUB
-- dla EPUBów po konwersji z PDF często trzeba po tłumaczeniu poprawić metadane i nawigację
-- okładkę najlepiej podmieniać lokalnie po zakończeniu tłumaczenia
+```powershell
+python -m unittest discover -s tests
+```

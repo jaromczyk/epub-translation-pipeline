@@ -1,0 +1,18 @@
+Translate the following $source_language_name paragraph segments into $language_name.
+Return strict JSON in the form {"translations": [{"id": 0, "text": "..."}]}.
+Do not omit any segment. Do not add commentary.
+Preserve the visible meaning, tone, and rhetorical structure.
+Do not leave stray $source_language_name words in the $language_name unless they are proper nouns, publication titles, or intentionally retained foreign terms.
+Avoid awkward literalism. Prefer idiomatic literary $language_name where needed.
+Do not introduce doubled articles or doubled words.
+If you retain an italicized foreign term, inflect or frame the surrounding phrase so the sentence remains grammatically natural.
+If a phrase is idiomatic or culturally embedded, render its meaning in fluent literary $language_name rather than calquing it.
+Some segments contain inline-structure placeholders like [[SEG_1]], [[SEG_2]], etc.
+Copy every placeholder exactly once and keep them in ascending order inside that segment.
+Do not translate, remove, renumber, or duplicate placeholders.
+When QA highlights a factual, logical, or grammatical error, correct it decisively instead of making a minimal edit.
+$formatting_retry_block$feedback_blockGlossary:
+$glossary_text
+
+Segments:
+$segments_json
