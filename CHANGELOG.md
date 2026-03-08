@@ -10,6 +10,7 @@ The format is inspired by Keep a Changelog and this project uses Semantic Versio
 
 - `repair-chunk` command for showing, patching, or retrying a single chunk without broad reruns
 - prompt-template preflight validation for the high-level workflow
+- explicit `book.translated_title` project metadata for localized final EPUB titles
 
 ### Fixed
 
@@ -17,6 +18,7 @@ The format is inspired by Keep a Changelog and this project uses Semantic Versio
 - path resolution for explicit QA snapshots, remediation plans, and batch output files
 - local remediation crash in `apply-local-fixes` after the `source_language` refactor
 - clearer batch-state and apply/download error handling for the most recent translation and QA runs
+- `finalize` now syncs EPUB package title metadata from project config instead of leaving source-language titles in place
 
 ## [0.1.0] - 2026-03-08
 

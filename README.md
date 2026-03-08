@@ -25,10 +25,22 @@ Current public release: `v0.1.0`
 python tools\epub_translate.py init-project --epub "book.epub" --project-root projects --source-language fr --target-language en
 ```
 
+Optional: set the translated book title up front so `finalize` can localize EPUB metadata automatically.
+
+```powershell
+python tools\epub_translate.py init-project --epub "book.epub" --project-root projects --source-language fr --target-language en --translated-title "My Book Title"
+```
+
 2. Configure the model:
 
 ```powershell
 python tools\epub_translate.py configure-openai --project my-book-en --project-root projects --model gpt-5.4 --reasoning-effort none --use-batch
+```
+
+You can also set or update the final translated metadata title:
+
+```powershell
+python tools\epub_translate.py configure-openai --project my-book-en --project-root projects --translated-title "My Book Title"
 ```
 
 3. Run the draft translation:
@@ -57,6 +69,8 @@ python tools\epub_translate.py review --project my-book-en --project-root projec
 ```powershell
 python tools\epub_translate.py finalize --project my-book-en --project-root projects
 ```
+
+`finalize` will sync EPUB package title metadata from `book.translated_title` when it is set.
 
 ## Repository Layout
 

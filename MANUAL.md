@@ -51,6 +51,12 @@ Avoid repeated broad retry loops. Use cloud QA as a focused diagnostic step, not
 python tools\epub_translate.py init-project --epub "book.epub" --project-root projects --source-language fr --target-language en
 ```
 
+Optional translated metadata title:
+
+```powershell
+python tools\epub_translate.py init-project --epub "book.epub" --project-root projects --source-language fr --target-language en --translated-title "My Book Title"
+```
+
 This creates:
 
 - `project.json`
@@ -80,6 +86,7 @@ Important options:
 - `--run-qa-after-apply` / `--no-run-qa-after-apply`
 - `--source-language`
 - `--target-language`
+- `--translated-title`
 
 ### 4. Estimate translation cost
 
@@ -132,6 +139,14 @@ Normalizes translated package metadata, syncs navigation files, and rebuilds the
 ```powershell
 python tools\epub_translate.py finalize --project my-book-en --project-root projects
 ```
+
+If `book.translated_title` is set in `project.json`, `finalize` also updates:
+
+- `dc:title` in `content.opf`
+- `calibre:title_sort` in `content.opf`
+- `docTitle` in `toc.ncx`
+
+If it is missing, `finalize` leaves the existing title metadata unchanged and emits a warning in its JSON output.
 
 ### `repair-chunk`
 

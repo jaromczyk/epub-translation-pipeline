@@ -405,6 +405,7 @@ def default_project_config(
     project_dir: Path,
     target_language: str = "en",
     source_language: str = "fr",
+    translated_title: Optional[str] = None,
 ) -> Dict:
     paths = project_paths(project_dir, target_language=target_language)
     return {
@@ -412,6 +413,7 @@ def default_project_config(
             "source_epub": str(epub_path.resolve()),
             "project_slug": project_dir.name,
             "output_epub": str(paths["output_epub"].resolve()),
+            "translated_title": translated_title,
         },
         "translation": {
             "source_language": source_language,
@@ -467,6 +469,8 @@ def read_project_config(project_dir: Path) -> Dict:
     if not config_path.exists():
         raise RuntimeError(f"Project config not found: {config_path}")
     config = load_json(config_path, {})
+    config.setdefault("book", {})
+    config["book"].setdefault("translated_title", None)
     config.setdefault("translation", {})
     config["translation"].setdefault("source_language", "fr")
     config["translation"].setdefault("target_language", "en")
@@ -2267,7 +2271,11 @@ def build_navigation_label_map(translated_dir: Path) -> Dict[str, str]:
     return label_map
 
 
-def normalize_translated_package(translated_dir: Path, target_language: str) -> None:
+def normalize_translated_package(
+    translated_dir: Path,
+    target_language: str,
+    translated_title: Optional[str] = None,
+) -> None:
     normalized_lang = (target_language or "en").split("-", 1)[0].lower()
     html_lang = target_language or normalized_lang
     label_map = build_navigation_label_map(translated_dir)
@@ -2291,6 +2299,12 @@ def normalize_translated_package(translated_dir: Path, target_language: str) -> 
                 title_text = normalize_space("".join(title.itertext()))
                 if derived_label and title_text in {"Converted Ebook", "", "Cover"}:
                     title.text = derived_label
+                elif (
+                    translated_title
+                    and html_path.name in {"index_split_000.html", "index.xhtml"}
+                    and title_text in {"Converted Ebook", ""}
+                ):
+                    title.text = translated_title
         tree.write(html_path, encoding="utf-8", xml_declaration=True)
 
     for opf_path in translated_dir.rglob("*.opf"):
@@ -2304,6 +2318,15 @@ def normalize_translated_package(translated_dir: Path, target_language: str) -> 
             if (lang.text or "").strip().lower() != normalized_lang:
                 lang.text = normalized_lang
                 changed = True
+        if translated_title:
+            for title in root.findall(".//{*}title"):
+                if (title.text or "").strip() != translated_title:
+                    title.text = translated_title
+                    changed = True
+            for meta in root.findall(".//{*}meta"):
+                if meta.attrib.get("name") == "calibre:title_sort" and meta.attrib.get("content") != translated_title:
+                    meta.attrib["content"] = translated_title
+                    changed = True
         if changed:
             tree.write(opf_path, encoding="utf-8", xml_declaration=True)
 
@@ -2314,6 +2337,10 @@ def normalize_translated_package(translated_dir: Path, target_language: str) -> 
             continue
         root = tree.getroot()
         root.attrib["{http://www.w3.org/XML/1998/namespace}lang"] = html_lang
+        if translated_title:
+            for title in root.findall(".//{*}docTitle/{*}text"):
+                if (title.text or "").strip() != translated_title:
+                    title.text = translated_title
         tree.write(ncx_path, encoding="utf-8", xml_declaration=True)
 
 
@@ -2357,17 +2384,27 @@ def sync_navigation_documents(translated_dir: Path) -> None:
             tree.write(ncx_path, encoding="utf-8", xml_declaration=True)
 
 
-def assemble_final_epub(project_dir: Path, config: Dict) -> Dict[str, str]:
+def assemble_final_epub(project_dir: Path, config: Dict) -> Dict[str, object]:
     paths = project_paths(project_dir)
     target_language = config["translation"].get("target_language", "en")
-    normalize_translated_package(paths["translated_dir"], target_language)
+    translated_title = normalize_space(config.get("book", {}).get("translated_title") or "") or None
+    warnings: List[str] = []
+    if not translated_title:
+        warnings.append(
+            "Translated content was finalized without a localized package title because "
+            "book.translated_title is unset in project.json."
+        )
+    normalize_translated_package(paths["translated_dir"], target_language, translated_title=translated_title)
     sync_navigation_documents(paths["translated_dir"])
     rezip_epub(paths["translated_dir"], paths["output_epub"])
-    return {
+    result: Dict[str, object] = {
         "project": project_dir.name,
         "output_epub": str(paths["output_epub"]),
         "translated_dir": str(paths["translated_dir"]),
     }
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def run_cli_preflight(project_dir: Path, config: Dict, mode: str) -> None:
@@ -2450,6 +2487,7 @@ def cmd_init_project(args: argparse.Namespace) -> None:
         project_dir,
         target_language=target_language,
         source_language=source_language,
+        translated_title=args.translated_title,
     )
     save_project_config(project_dir, config)
     write_default_glossary(paths["glossary"], target_language=target_language, source_language=source_language)
@@ -2480,6 +2518,8 @@ def cmd_configure_openai(args: argparse.Namespace) -> None:
         config["translation"]["source_language"] = args.source_language
     if args.target_language is not None:
         config["translation"]["target_language"] = args.target_language
+    if args.translated_title is not None:
+        config["book"]["translated_title"] = args.translated_title
     if args.model is not None:
         openai["model"] = args.model
     if args.temperature is not None:
@@ -2493,7 +2533,17 @@ def cmd_configure_openai(args: argparse.Namespace) -> None:
     if args.run_qa_after_apply is not None:
         config["translation"]["run_qa_after_apply"] = args.run_qa_after_apply
     save_project_config(project_dir, config)
-    print(json.dumps({"openai": openai, "translation": config["translation"]}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "book": {"translated_title": config["book"].get("translated_title")},
+                "openai": openai,
+                "translation": config["translation"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def cmd_draft(args: argparse.Namespace) -> None:
@@ -4101,6 +4151,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--project")
     init_parser.add_argument("--source-language", default="fr")
     init_parser.add_argument("--target-language", default="en")
+    init_parser.add_argument("--translated-title")
     init_parser.add_argument("--project-root", default="projects")
     init_parser.add_argument("--force", action="store_true")
     init_parser.set_defaults(func=cmd_init_project)
@@ -4116,6 +4167,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure_parser.add_argument("--project-root", default="projects")
     configure_parser.add_argument("--source-language")
     configure_parser.add_argument("--target-language")
+    configure_parser.add_argument("--translated-title")
     configure_parser.add_argument("--model")
     configure_parser.add_argument("--temperature", type=float)
     configure_parser.add_argument("--send-temperature", action=argparse.BooleanOptionalAction, default=None)

@@ -44,9 +44,11 @@ class EpubTranslateTests(unittest.TestCase):
                 project_dir,
                 target_language="en",
                 source_language="fr",
+                translated_title="Sample Title",
             )
             self.assertEqual(config["translation"]["source_language"], "fr")
             self.assertEqual(config["translation"]["target_language"], "en")
+            self.assertEqual(config["book"]["translated_title"], "Sample Title")
 
     def test_read_project_config_backfills_source_language(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -62,6 +64,7 @@ class EpubTranslateTests(unittest.TestCase):
             )
             config = self.mod.read_project_config(project_dir)
             self.assertEqual(config["translation"]["source_language"], "fr")
+            self.assertIsNone(config["book"]["translated_title"])
 
     def test_prompt_templates_are_loaded_from_files(self):
         prompt = self.mod.build_system_prompt("en", source_language="fr")
@@ -166,6 +169,79 @@ class EpubTranslateTests(unittest.TestCase):
             broken = current.replace("[[SEG_1]]", "")
             with self.assertRaises(RuntimeError):
                 self.mod.apply_chunk_replacements(project_dir, config, href, 0, {0: broken})
+
+    def test_assemble_final_epub_syncs_translated_title_into_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            project_dir = base / "sample-project"
+            translated_dir = project_dir / "workspace" / "unpacked" / "translated"
+            translated_dir.mkdir(parents=True)
+            (translated_dir / "mimetype").write_text("application/epub+zip", encoding="utf-8")
+            (translated_dir / "content.opf").write_text(
+                """<?xml version='1.0' encoding='utf-8'?>
+<package xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata>
+    <dc:language>pl</dc:language>
+    <dc:title>Sparte et Les Sudistes</dc:title>
+    <meta name="calibre:title_sort" content="Sparte et Les Sudistes" />
+  </metadata>
+</package>""",
+                encoding="utf-8",
+            )
+            (translated_dir / "toc.ncx").write_text(
+                """<?xml version='1.0' encoding='utf-8'?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <docTitle><text>Sparte et Les Sudistes</text></docTitle>
+  <navMap />
+</ncx>""",
+                encoding="utf-8",
+            )
+            (translated_dir / "index_split_000.html").write_text(
+                """<?xml version='1.0' encoding='utf-8'?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Converted Ebook</title></head><body><p>Front matter</p></body></html>""",
+                encoding="utf-8",
+            )
+            config = self.mod.default_project_config(
+                base / "book.epub",
+                project_dir,
+                target_language="pl",
+                source_language="fr",
+                translated_title="Sparta i Południowcy",
+            )
+            self.mod.save_json(project_dir / "project.json", config)
+            result = self.mod.assemble_final_epub(project_dir, config)
+            self.assertNotIn("warnings", result)
+            self.assertIn("Sparta i Południowcy", (translated_dir / "content.opf").read_text(encoding="utf-8"))
+            self.assertIn("Sparta i Południowcy", (translated_dir / "toc.ncx").read_text(encoding="utf-8"))
+            self.assertIn("Sparta i Południowcy", (translated_dir / "index_split_000.html").read_text(encoding="utf-8"))
+
+    def test_assemble_final_epub_warns_when_translated_title_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            project_dir = base / "sample-project"
+            translated_dir = project_dir / "workspace" / "unpacked" / "translated"
+            translated_dir.mkdir(parents=True)
+            (translated_dir / "mimetype").write_text("application/epub+zip", encoding="utf-8")
+            (translated_dir / "content.opf").write_text(
+                """<?xml version='1.0' encoding='utf-8'?>
+<package xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata><dc:language>pl</dc:language><dc:title>Original</dc:title></metadata>
+</package>""",
+                encoding="utf-8",
+            )
+            (translated_dir / "toc.ncx").write_text(
+                """<?xml version='1.0' encoding='utf-8'?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <docTitle><text>Original</text></docTitle>
+  <navMap />
+</ncx>""",
+                encoding="utf-8",
+            )
+            config = self.mod.default_project_config(base / "book.epub", project_dir, target_language="pl", source_language="fr")
+            self.mod.save_json(project_dir / "project.json", config)
+            result = self.mod.assemble_final_epub(project_dir, config)
+            self.assertIn("warnings", result)
+            self.assertIn("book.translated_title", result["warnings"][0])
 
 
 if __name__ == "__main__":
