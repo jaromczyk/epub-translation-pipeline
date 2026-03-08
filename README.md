@@ -10,11 +10,13 @@ The repository contains the tool and documentation only. Book files, generated p
 - finds content XHTML/HTML files in reading order
 - translates only visible reader-facing text
 - preserves tags, attributes, anchors, links, and EPUB structure
+- translates paragraph-scale blocks while preserving inline structure via placeholders
 - splits long chapters into smaller chunks
 - saves progress so translation can be resumed
 - rebuilds translated EPUB output
 - supports OpenAI direct mode and Batch API workflows
 - supports lightweight cloud QA as a separate batch
+- can suggest per-book glossary candidates from the source EPUB
 
 ## Main Files
 

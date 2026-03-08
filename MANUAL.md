@@ -89,7 +89,23 @@ python tools\epub_translate.py estimate-cost --project qu-est-ce-que-le-fascisme
 
 To jest estymacja, nie gwarantowany koszt końcowy.
 
-### 5. Szacunek kosztu QA w chmurze
+### 5. Sugestie do glosariusza
+
+```cmd
+python tools\epub_translate.py suggest-glossary --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
+```
+
+Skrypt zapisze kandydatów do:
+
+- `projects/<projekt>/glossary_suggestions.md`
+
+Opcjonalnie można ograniczyć zakres:
+
+```cmd
+python tools\epub_translate.py suggest-glossary --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --chapter OEBPS/e9782307290681_c01.xhtml --max-candidates 40
+```
+
+### 6. Szacunek kosztu QA w chmurze
 
 ```cmd
 python tools\epub_translate.py estimate-qa-cost --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
@@ -114,6 +130,28 @@ Jeden rozdział:
 ```cmd
 python tools\epub_translate.py run-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --chapter OEBPS/e9782307290681_c01.xhtml
 ```
+
+Feedback loop z `QA_cloud.md`:
+
+- jeśli w `projects/<projekt>/QA_cloud.md` istnieją findings dla danego `chapter/chunk`, `run-batch` automatycznie wyśle te chunki ponownie, nawet jeśli są już oznaczone jako ukończone w `progress.json`
+- skrypt dołączy streszczenie i listę uwag QA do promptu retranslacji tego konkretnego chunku
+- tłumaczenie idzie teraz blokami akapitowymi z placeholderami `[[SEG_n]]`, więc model widzi cały akapit i ma odbudować naturalną składnię przy zachowaniu struktury inline
+- chunki z `high` + `formatting` dostają mocniejszy prompt retry, który każe odbudować składnię między segmentami
+- nie trzeba ręcznie czyścić `progress.json`, jeśli chcesz po prostu poprawić problematyczne chunki po cloud QA
+
+Typowy retry po QA, z zachowaniem chunk size `6400`:
+
+```cmd
+python tools\epub_translate.py run-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --max-chars 6400
+```
+
+Tańszy retry tylko dla chunków z co najmniej jednym issue `high`:
+
+```cmd
+python tools\epub_translate.py run-batch --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --max-chars 6400 --retry-only-high
+```
+
+Ten tryb nadal tłumaczy z oryginalnego EPUB źródłowego. `QA_cloud.md` działa wyłącznie jako warstwa feedbacku dla ponownego tłumaczenia.
 
 ### Sprawdzanie statusu
 
@@ -184,6 +222,12 @@ python tools\epub_translate.py apply-qa-output --project qu-est-ce-que-le-fascis
 Wynik trafia do:
 
 - `projects/<projekt>/QA_cloud.md`
+- najnowszy snapshot jest też odkładany do `projects/<projekt>/QA_cloud_history/YYYY-MM-DD_<scope>.md`
+
+Przykłady:
+
+- `projects/qu-est-ce-que-le-fascisme-maurice-bardeche-pl/QA_cloud_history/2026-03-08_c02.md`
+- `projects/qu-est-ce-que-le-fascisme-maurice-bardeche-pl/QA_cloud_history/2026-03-08_full.md`
 
 ## Workflow direct
 
@@ -233,6 +277,7 @@ Praktycznie:
 Plik:
 
 - `projects/<projekt>/glossary.md`
+- `projects/<projekt>/glossary_suggestions.md`
 
 Wpisuj tam:
 
@@ -242,6 +287,7 @@ Wpisuj tam:
 - terminy historyczne i prawne
 
 Skrypt dołącza glosariusz do promptu.
+`suggest-glossary` generuje osobny plik kandydatów, żeby można było ręcznie przenieść tylko sensowne wpisy do właściwego `glossary.md`.
 
 ## QA i cleanup
 
@@ -270,6 +316,7 @@ Lokalny cleanup zwykle obejmuje:
 
 - `project.json` — konfiguracja projektu
 - `glossary.md` — glosariusz
+- `glossary_suggestions.md` — kandydaci do glosariusza
 - `QA.md` — raport jakości
 - `workspace/unpacked/source/` — rozpakowany oryginał
 - `workspace/unpacked/translated/` — rozpakowana wersja robocza po tłumaczeniu
