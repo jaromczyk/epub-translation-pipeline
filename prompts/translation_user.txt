@@ -11,7 +11,7 @@ Some segments contain inline-structure placeholders like [[SEG_1]], [[SEG_2]], e
 Copy every placeholder exactly once and keep them in ascending order inside that segment.
 Do not translate, remove, renumber, or duplicate placeholders.
 When QA highlights a factual, logical, or grammatical error, correct it decisively instead of making a minimal edit.
-$formatting_retry_block$feedback_blockGlossary:
+${formatting_retry_block}${feedback_block}Glossary:
 $glossary_text
 
 Segments:

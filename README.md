@@ -14,6 +14,7 @@ Current public release: `v0.1.0`
 - external prompt templates in [`prompts/`](prompts/)
 - resumable draft translation via direct mode or Batch API
 - local validation, remediation manifests, and targeted retry flow
+- explicit `repair-chunk` command for high-risk manual or single-chunk recovery work
 - explicit `finalize` command to rebuild the output EPUB
 
 ## Happy Path
@@ -46,6 +47,7 @@ python tools\epub_translate.py review --project my-book-en --project-root projec
 
 - `build-remediation-plan`
 - `apply-local-fixes`
+- `repair-chunk`
 - `retry-targeted`
 - `qa-changed`
 - `final-gate`

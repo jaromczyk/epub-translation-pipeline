@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is inspired by Keep a Changelog and this project uses Semantic Versioning tags for public releases.
 
+## [Unreleased]
+
+### Added
+
+- `repair-chunk` command for showing, patching, or retrying a single chunk without broad reruns
+- prompt-template preflight validation for the high-level workflow
+
+### Fixed
+
+- prompt-template rendering regression caused by adjacent placeholders in external prompt files
+- path resolution for explicit QA snapshots, remediation plans, and batch output files
+- local remediation crash in `apply-local-fixes` after the `source_language` refactor
+- clearer batch-state and apply/download error handling for the most recent translation and QA runs
+
 ## [0.1.0] - 2026-03-08
 
 First public release.

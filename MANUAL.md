@@ -38,7 +38,7 @@ The intended low-cost flow is:
 
 1. `draft`
 2. `review`
-3. optional remediation on the flagged subset
+3. optional cloud QA once, then remediation on the flagged subset
 4. `finalize`
 
 Avoid repeated broad retry loops. Use cloud QA as a focused diagnostic step, not as the default loop for the whole book.
@@ -133,6 +133,36 @@ Normalizes translated package metadata, syncs navigation files, and rebuilds the
 python tools\epub_translate.py finalize --project my-book-en --project-root projects
 ```
 
+### `repair-chunk`
+
+Use this when one chunk needs inspection, a manual patch, or a single emergency retry.
+
+Show chunk context:
+
+```powershell
+python tools\epub_translate.py repair-chunk --project my-book-en --project-root projects --href OEBPS\chapter01.xhtml --chunk-index 3 --mode show
+```
+
+Apply one or more manual replacements:
+
+```powershell
+python tools\epub_translate.py repair-chunk --project my-book-en --project-root projects --href OEBPS\chapter01.xhtml --chunk-index 3 --mode apply --set "0=Corrected text with [[SEG_1]] placeholder"
+```
+
+Apply long replacement text from a file:
+
+```powershell
+python tools\epub_translate.py repair-chunk --project my-book-en --project-root projects --href OEBPS\chapter01.xhtml --chunk-index 3 --mode apply --set-file "0=patches\chunk3_unit0.txt"
+```
+
+Retry exactly one chunk through the model:
+
+```powershell
+python tools\epub_translate.py repair-chunk --project my-book-en --project-root projects --href OEBPS\chapter01.xhtml --chunk-index 3 --mode retry-single
+```
+
+`repair-chunk` fails loudly on placeholder mismatch and does not partially write a broken chunk.
+
 ## Low-Level Translation Commands
 
 Use these when you need direct control over the pipeline.
@@ -162,6 +192,12 @@ python tools\epub_translate.py batch-status --project my-book-en --project-root 
 python tools\epub_translate.py batch-download-output --project my-book-en --project-root projects
 python tools\epub_translate.py apply-batch-output --project my-book-en --project-root projects --skip-qa
 ```
+
+If you pass an explicit file path to `apply-batch-output` or `apply-qa-output`, the tool now accepts:
+
+- an absolute path
+- a repo-relative path such as `projects\my-book-en\batches\output.jsonl`
+- a project-relative file only when it actually exists inside the project
 
 ## QA Commands
 
@@ -194,6 +230,15 @@ Cloud QA writes:
 ## Remediation Commands
 
 These commands support the deterministic `draft -> QA -> final` flow without broad reruns.
+
+Recommended cost discipline:
+
+1. `draft`
+2. optional `run-qa-batch` once
+3. `build-remediation-plan`
+4. `apply-local-fixes`
+5. `repair-chunk` for single high-risk passages
+6. `finalize`
 
 ### Build a frozen remediation plan
 
@@ -257,6 +302,7 @@ Typical important project files:
 - Batch mode is usually the cheapest default for full-book draft translation.
 - `reasoning_effort none` is a sensible default for draft and QA.
 - Targeted retries should stay small. Do not rerun the whole book unless you intentionally want a fresh draft.
+- Prefer `repair-chunk` for one-off emergency fixes instead of ad-hoc scripts or broad reruns.
 
 ## Tests
 

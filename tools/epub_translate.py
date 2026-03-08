@@ -196,6 +196,34 @@ def render_prompt_template(name: str, **values: str) -> str:
     return Template(load_prompt_template(name)).substitute(normalized)
 
 
+def validate_prompt_templates() -> None:
+    render_prompt_template(
+        "translation_system.txt",
+        language_name="English",
+        source_language_name="French",
+    )
+    render_prompt_template(
+        "translation_user.txt",
+        source_language_name="French",
+        language_name="English",
+        formatting_retry_block="",
+        feedback_block="",
+        glossary_text="- none yet",
+        segments_json='[{"id": 0, "text": "Bonjour"}]',
+    )
+    render_prompt_template(
+        "qa_system.txt",
+        source_language_name="French",
+        language_name="English",
+    )
+    render_prompt_template(
+        "qa_user.txt",
+        source_language_name="French",
+        language_name="English",
+        segments_json='[{"id": "0", "source": "Bonjour", "translation": "Hello"}]',
+    )
+
+
 def build_system_prompt(target_language: str, source_language: Optional[str] = None) -> str:
     return render_prompt_template(
         "translation_system.txt",
@@ -277,6 +305,49 @@ def file_sha256(path: Path) -> Optional[str]:
 
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+def configure_stdio() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8")
+            except Exception:
+                pass
+
+
+def repo_root() -> Path:
+    return Path.cwd().resolve()
+
+
+def resolve_existing_cli_path(project_dir: Path, value: str, purpose: str) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+        if resolved.exists():
+            return resolved
+        raise RuntimeError(f"{purpose} not found: {resolved}")
+    repo_candidate = (repo_root() / candidate).resolve()
+    if repo_candidate.exists():
+        return repo_candidate
+    project_candidate = (project_dir / candidate).resolve()
+    if project_candidate.exists():
+        return project_candidate
+    raise RuntimeError(
+        f"{purpose} not found: tried '{repo_candidate}' and '{project_candidate}'. "
+        "Use an absolute path or a path relative to the repo root."
+    )
+
+
+def resolve_output_cli_path(project_dir: Path, value: str) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    if candidate.parent == Path("."):
+        return (project_dir / candidate).resolve()
+    return (repo_root() / candidate).resolve()
 
 
 def slugify(value: str) -> str:
@@ -1222,11 +1293,7 @@ def resolve_qa_snapshot(
     snapshot_meta: Optional[Dict] = None
 
     if explicit_snapshot:
-        snapshot_path = Path(explicit_snapshot)
-        if not snapshot_path.is_absolute():
-            snapshot_path = (project_dir / snapshot_path).resolve()
-        if not snapshot_path.exists():
-            raise RuntimeError(f"QA snapshot not found: {snapshot_path}")
+        snapshot_path = resolve_existing_cli_path(project_dir, explicit_snapshot, "QA snapshot")
         snapshot_meta = infer_qa_snapshot_scope(snapshot_path, source_dir)
     else:
         active_snapshot = index.get("active_snapshot")
@@ -1404,11 +1471,7 @@ def build_qa_requests(
 def resolve_snapshot_for_manifest(project_dir: Path, explicit_snapshot: Optional[str] = None) -> Tuple[Path, Dict]:
     paths = project_paths(project_dir)
     if explicit_snapshot:
-        snapshot_path = Path(explicit_snapshot)
-        if not snapshot_path.is_absolute():
-            snapshot_path = (project_dir / snapshot_path).resolve()
-        if not snapshot_path.exists():
-            raise RuntimeError(f"QA snapshot not found: {snapshot_path}")
+        snapshot_path = resolve_existing_cli_path(project_dir, explicit_snapshot, "QA snapshot")
         return snapshot_path, infer_qa_snapshot_scope(snapshot_path, paths["source_dir"])
     index = load_qa_index(paths)
     active_snapshot = index.get("active_snapshot")
@@ -1658,6 +1721,205 @@ def load_chunk_from_source(paths: Dict[str, Path], href: str, chunk_index: int, 
     if chunk_index >= len(chunks):
         raise RuntimeError(f"Chunk {chunk_index} out of range for {href}")
     return chunks[chunk_index]
+
+
+def load_repair_chunk_feedback(project_dir: Path, href: str, chunk_index: int) -> Dict:
+    paths = project_paths(project_dir)
+    index = load_qa_index(paths)
+    snapshot = index.get("active_snapshot")
+    snapshot_path: Optional[Path] = None
+    if snapshot:
+        candidate = Path(snapshot.get("path", ""))
+        if candidate.exists():
+            snapshot_path = candidate
+    elif paths["qa_cloud"].exists():
+        snapshot_path = paths["qa_cloud"]
+    if not snapshot_path or not snapshot_path.exists():
+        return {"summary": "No QA snapshot available for this chunk.", "issues": [], "snapshot_path": None}
+    feedback = load_qa_feedback(snapshot_path)
+    chunk_feedback = feedback.get(href, {}).get(chunk_index, {"summary": "No QA issues for this chunk.", "issues": []})
+    return {
+        "summary": chunk_feedback.get("summary") or "No QA issues for this chunk.",
+        "issues": annotate_qa_issues_for_gate(chunk_feedback.get("issues") or []),
+        "snapshot_path": str(snapshot_path),
+    }
+
+
+def build_repair_chunk_view(
+    project_dir: Path,
+    config: Dict,
+    href: str,
+    chunk_index: int,
+    max_chars: Optional[int] = None,
+) -> Dict:
+    paths = project_paths(project_dir)
+    progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
+    chunk = load_chunk_from_source(paths, href, chunk_index, max_chars or config["translation"]["max_chars_per_chunk"])
+    translated_lookup = progress_lookup_for_href(progress, href)
+    qa_feedback = load_repair_chunk_feedback(project_dir, href, chunk_index)
+    units = []
+    for index, unit in enumerate(chunk):
+        units.append(
+            {
+                "unit_index": index,
+                "xpath": unit.xpath,
+                "field": unit.field,
+                "source": unit.plain_text,
+                "translation": render_unit_translation(unit, translated_lookup),
+                "translation_with_placeholders": render_unit_translation_with_placeholders(unit, translated_lookup),
+                "placeholders": [segment_placeholder(i + 1) for i in range(max(0, len(unit.targets) - 1))],
+            }
+        )
+    return {
+        "project": project_dir.name,
+        "href": href,
+        "chunk_index": chunk_index,
+        "unit_count": len(units),
+        "qa_feedback": qa_feedback,
+        "units": units,
+    }
+
+
+def parse_repair_assignment(value: str, project_dir: Path, from_file: bool = False) -> Tuple[int, str]:
+    if "=" not in value:
+        raise RuntimeError("Repair assignment must use '<unit_index>=<text>' format.")
+    raw_index, raw_payload = value.split("=", 1)
+    try:
+        unit_index = int(raw_index.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"Repair assignment has invalid unit index: {raw_index!r}") from exc
+    payload = raw_payload
+    if from_file:
+        payload_path = resolve_existing_cli_path(project_dir, raw_payload, "Repair text file")
+        payload = payload_path.read_text(encoding="utf-8")
+    return unit_index, payload
+
+
+def apply_chunk_replacements(
+    project_dir: Path,
+    config: Dict,
+    href: str,
+    chunk_index: int,
+    replacements: Dict[int, str],
+    max_chars: Optional[int] = None,
+) -> Dict:
+    if not replacements:
+        raise RuntimeError("No repair replacements provided. Use --set or --set-file.")
+    paths = project_paths(project_dir)
+    progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
+    chunk = load_chunk_from_source(paths, href, chunk_index, max_chars or config["translation"]["max_chars_per_chunk"])
+    translated_lookup = progress_lookup_for_href(progress, href)
+    changed_units: List[int] = []
+    for unit_index, new_text in sorted(replacements.items()):
+        if unit_index < 0 or unit_index >= len(chunk):
+            raise RuntimeError(f"Repair unit index out of range for {href} chunk {chunk_index}: {unit_index}")
+        unit = chunk[unit_index]
+        try:
+            parts = split_translated_text(unit, normalize_translation_text(new_text))
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Placeholder mismatch while repairing {href} chunk {chunk_index} unit {unit_index}: {exc}"
+            ) from exc
+        for target, piece in zip(unit.targets, parts):
+            translated_lookup[(target.xpath, target.field)] = piece
+        changed_units.append(unit_index)
+    target_file = save_translated_lookup_for_href(paths, progress, href, translated_lookup)
+    save_json(paths["progress"], progress)
+    normalize_translated_package(paths["translated_dir"], config["translation"].get("target_language", "en"))
+    sync_navigation_documents(paths["translated_dir"])
+    rezip_epub(paths["translated_dir"], paths["output_epub"])
+    append_iteration_event(
+        project_dir,
+        "repair_chunk_applied",
+        {
+            "href": href,
+            "chunk_index": chunk_index,
+            "changed_units": changed_units,
+            "output_epub": str(paths["output_epub"]),
+        },
+    )
+    return {
+        "href": href,
+        "chunk_index": chunk_index,
+        "changed_units": changed_units,
+        "target_file": str(target_file),
+        "output_epub": str(paths["output_epub"]),
+    }
+
+
+def retry_single_chunk(
+    project_dir: Path,
+    config: Dict,
+    href: str,
+    chunk_index: int,
+    max_chars: Optional[int] = None,
+) -> Dict:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+    model = config["openai"].get("model")
+    if not model:
+        raise RuntimeError("No model configured. Run configure-openai --model ... first.")
+    paths = project_paths(project_dir)
+    progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
+    glossary = load_glossary(paths["glossary"])
+    chunk = load_chunk_from_source(paths, href, chunk_index, max_chars or config["translation"]["max_chars_per_chunk"])
+    chunk_feedback = load_repair_chunk_feedback(project_dir, href, chunk_index)
+    qa_feedback_text = build_qa_feedback_text(chunk_feedback)
+    strong_formatting_retry = chunk_has_high_formatting_issue(chunk_feedback)
+    body = {
+        "model": model,
+        "input": build_chunk_payload(
+            chunk,
+            glossary,
+            config["translation"].get("source_language", "fr"),
+            config["translation"].get("target_language", "en"),
+            qa_feedback_text=qa_feedback_text,
+            strong_formatting_retry=strong_formatting_retry,
+        ),
+    }
+    temperature = config["openai"].get("temperature")
+    if config["openai"].get("send_temperature", True) and temperature is not None:
+        body["temperature"] = temperature
+    response = post_openai_responses(api_key, body)
+    output_text = detect_output_text(response)
+    translations = extract_translations_from_response(output_text, expected_count=len(chunk))
+    translated_lookup = progress_lookup_for_href(progress, href)
+    changed_units: List[int] = []
+    for unit_index, (unit, translated_text) in enumerate(zip(chunk, translations)):
+        try:
+            split_parts = split_translated_text(unit, normalize_translation_text(translated_text))
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Placeholder mismatch while retrying {href} chunk {chunk_index} unit {unit_index}: {exc}"
+            ) from exc
+        for target, piece in zip(unit.targets, split_parts):
+            translated_lookup[(target.xpath, target.field)] = piece
+        changed_units.append(unit_index)
+    target_file = save_translated_lookup_for_href(paths, progress, href, translated_lookup)
+    save_json(paths["progress"], progress)
+    normalize_translated_package(paths["translated_dir"], config["translation"].get("target_language", "en"))
+    sync_navigation_documents(paths["translated_dir"])
+    rezip_epub(paths["translated_dir"], paths["output_epub"])
+    append_iteration_event(
+        project_dir,
+        "repair_chunk_retried",
+        {
+            "href": href,
+            "chunk_index": chunk_index,
+            "response_id": response.get("id"),
+            "changed_units": changed_units,
+            "output_epub": str(paths["output_epub"]),
+        },
+    )
+    return {
+        "href": href,
+        "chunk_index": chunk_index,
+        "response_id": response.get("id"),
+        "changed_units": changed_units,
+        "target_file": str(target_file),
+        "output_epub": str(paths["output_epub"]),
+    }
 
 
 def repair_formatting_excerpt(excerpt: str, note: str) -> Optional[str]:
@@ -2108,6 +2370,41 @@ def assemble_final_epub(project_dir: Path, config: Dict) -> Dict[str, str]:
     }
 
 
+def run_cli_preflight(project_dir: Path, config: Dict, mode: str) -> None:
+    validate_prompt_templates()
+    source_language = config["translation"].get("source_language")
+    target_language = config["translation"].get("target_language")
+    if not source_language or not target_language:
+        raise RuntimeError(
+            f"Project '{project_dir.name}' is missing source/target language settings. "
+            "Run configure-openai --source-language ... --target-language ... first."
+        )
+    paths = project_paths(project_dir)
+    if mode == "draft":
+        if not config["openai"].get("model"):
+            raise RuntimeError(
+                f"Project '{project_dir.name}' has no model configured. "
+                "Run configure-openai --model ... first."
+            )
+        if not paths["source_dir"].exists():
+            raise RuntimeError(
+                f"Source workspace not found: {paths['source_dir']}. "
+                "Run init-project again or restore the unpacked source workspace."
+            )
+    elif mode == "review":
+        if not paths["progress"].exists():
+            raise RuntimeError(
+                f"Translation progress file not found: {paths['progress']}. "
+                "Run draft/apply-batch-output before review."
+            )
+    elif mode == "finalize":
+        if not paths["translated_dir"].exists():
+            raise RuntimeError(
+                f"Translated workspace not found: {paths['translated_dir']}. "
+                "Run draft/apply-batch-output before finalize."
+            )
+
+
 def text_unit_from_dict(data: Dict) -> TextUnit:
     return TextUnit(
         xpath=data["xpath"],
@@ -2202,6 +2499,7 @@ def cmd_configure_openai(args: argparse.Namespace) -> None:
 def cmd_draft(args: argparse.Namespace) -> None:
     project_dir = infer_project_dir(args.project, None, Path(args.project_root))
     config = read_project_config(project_dir)
+    run_cli_preflight(project_dir, config, mode="draft")
     if config["openai"].get("use_batch_api", True):
         cmd_run_batch(
             argparse.Namespace(
@@ -2232,6 +2530,9 @@ def cmd_draft(args: argparse.Namespace) -> None:
 
 
 def cmd_review(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    run_cli_preflight(project_dir, config, mode="review")
     cmd_validate_local(
         argparse.Namespace(
             project=args.project,
@@ -2245,8 +2546,47 @@ def cmd_review(args: argparse.Namespace) -> None:
 def cmd_finalize(args: argparse.Namespace) -> None:
     project_dir = infer_project_dir(args.project, None, Path(args.project_root))
     config = read_project_config(project_dir)
+    run_cli_preflight(project_dir, config, mode="finalize")
     result = assemble_final_epub(project_dir, config)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_repair_chunk(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    config = read_project_config(project_dir)
+    if args.mode == "show":
+        view = build_repair_chunk_view(project_dir, config, args.href, args.chunk_index, max_chars=args.max_chars)
+        print(json.dumps(view, ensure_ascii=False, indent=2))
+        return
+    if args.mode == "apply":
+        replacements: Dict[int, str] = {}
+        for item in args.set or []:
+            unit_index, text = parse_repair_assignment(item, project_dir, from_file=False)
+            replacements[unit_index] = text
+        for item in args.set_file or []:
+            unit_index, text = parse_repair_assignment(item, project_dir, from_file=True)
+            replacements[unit_index] = text
+        result = apply_chunk_replacements(
+            project_dir,
+            config,
+            args.href,
+            args.chunk_index,
+            replacements,
+            max_chars=args.max_chars,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if args.mode == "retry-single":
+        result = retry_single_chunk(
+            project_dir,
+            config,
+            args.href,
+            args.chunk_index,
+            max_chars=args.max_chars,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    raise RuntimeError(f"Unsupported repair mode: {args.mode}")
 
 
 def cmd_estimate_cost(args: argparse.Namespace) -> None:
@@ -2966,7 +3306,7 @@ def cmd_build_remediation_plan(args: argparse.Namespace) -> None:
     paths = project_paths(project_dir)
     snapshot_path, snapshot_meta = resolve_snapshot_for_manifest(project_dir, explicit_snapshot=args.qa_snapshot)
     manifest = build_remediation_manifest(project_dir, config, snapshot_path, snapshot_meta)
-    output_path = Path(args.output) if args.output else paths["remediation_plan"]
+    output_path = resolve_output_cli_path(project_dir, args.output) if args.output else paths["remediation_plan"]
     save_remediation_plan(output_path, manifest)
     append_iteration_event(
         project_dir,
@@ -2995,11 +3335,12 @@ def cmd_apply_local_fixes(args: argparse.Namespace) -> None:
     project_dir = infer_project_dir(args.project, None, Path(args.project_root))
     config = read_project_config(project_dir)
     paths = project_paths(project_dir)
-    manifest_path = Path(args.plan) if args.plan else paths["remediation_plan"]
+    manifest_path = resolve_existing_cli_path(project_dir, args.plan, "Remediation plan") if args.plan else paths["remediation_plan"]
     manifest = load_remediation_plan(manifest_path)
     verify_frozen_snapshot(manifest)
     progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
     max_chars = config["translation"]["max_chars_per_chunk"]
+    source_language = config["translation"].get("source_language", "fr")
     target_language = config["translation"].get("target_language", "en")
     changed_files: List[Path] = []
     changed_chunk_keys: List[str] = []
@@ -3066,7 +3407,7 @@ def cmd_retry_targeted(args: argparse.Namespace) -> None:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set.")
     paths = project_paths(project_dir)
-    manifest_path = Path(args.plan) if args.plan else paths["remediation_plan"]
+    manifest_path = resolve_existing_cli_path(project_dir, args.plan, "Remediation plan") if args.plan else paths["remediation_plan"]
     manifest = load_remediation_plan(manifest_path)
     verify_frozen_snapshot(manifest)
     if manifest.get("targeted_retry_rounds", 0) >= 1:
@@ -3201,7 +3542,7 @@ def cmd_qa_changed(args: argparse.Namespace) -> None:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set.")
     paths = project_paths(project_dir)
-    manifest_path = Path(args.plan) if args.plan else paths["remediation_plan"]
+    manifest_path = resolve_existing_cli_path(project_dir, args.plan, "Remediation plan") if args.plan else paths["remediation_plan"]
     manifest = load_remediation_plan(manifest_path)
     verify_frozen_snapshot(manifest)
     model = config["openai"].get("model")
@@ -3308,7 +3649,7 @@ def cmd_qa_changed(args: argparse.Namespace) -> None:
 def cmd_final_gate(args: argparse.Namespace) -> None:
     project_dir = infer_project_dir(args.project, None, Path(args.project_root))
     paths = project_paths(project_dir)
-    manifest_path = Path(args.plan) if args.plan else paths["remediation_plan"]
+    manifest_path = resolve_existing_cli_path(project_dir, args.plan, "Remediation plan") if args.plan else paths["remediation_plan"]
     manifest = load_remediation_plan(manifest_path)
     qa_changed = manifest.get("qa_changed")
     if not qa_changed:
@@ -3411,7 +3752,20 @@ def load_batch_state(project_dir: Path, batch_id: Optional[str], qa: bool = Fals
     state_path = paths["qa_last_batch"] if qa else project_dir / "batches" / "last_batch.json"
     if batch_id:
         return state_path, {"id": batch_id}
-    return state_path, load_json(state_path, {})
+    state = load_json(state_path, {})
+    if state.get("id"):
+        return state_path, state
+    fallback_path = paths["qa_last_batch"] if qa else project_dir / "batches" / "last_batch.json"
+    fallback_state = load_json(fallback_path, {})
+    if fallback_state.get("id"):
+        return state_path, fallback_state
+    return state_path, state
+
+
+def latest_batch_error_message(qa: bool = False) -> str:
+    if qa:
+        return "No QA batch id available. Run run-qa-batch first or pass --batch-id explicitly."
+    return "No batch id available. Run draft/run-batch first or pass --batch-id explicitly."
 
 
 def cmd_batch_status(args: argparse.Namespace) -> None:
@@ -3422,7 +3776,7 @@ def cmd_batch_status(args: argparse.Namespace) -> None:
     state_path, state = load_batch_state(project_dir, args.batch_id, qa=False)
     batch_id = args.batch_id or state.get("id")
     if not batch_id:
-        raise RuntimeError("No batch id available. Submit a batch first or pass --batch-id.")
+        raise RuntimeError(latest_batch_error_message(qa=False))
     data = get_openai_json(api_key, f"https://api.openai.com/v1/batches/{batch_id}")
     save_json(state_path, data)
     print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -3437,7 +3791,7 @@ def cmd_batch_download_output(args: argparse.Namespace) -> None:
     state_path, state = load_batch_state(project_dir, args.batch_id, qa=False)
     batch_id = args.batch_id or state.get("id")
     if not batch_id:
-        raise RuntimeError("No batch id available. Submit a batch first or pass --batch-id.")
+        raise RuntimeError(latest_batch_error_message(qa=False))
     if not state or state.get("id") != batch_id or not state.get("output_file_id"):
         state = get_openai_json(api_key, f"https://api.openai.com/v1/batches/{batch_id}")
         save_json(state_path, state)
@@ -3466,7 +3820,7 @@ def cmd_qa_batch_status(args: argparse.Namespace) -> None:
     state_path, state = load_batch_state(project_dir, args.batch_id, qa=True)
     batch_id = args.batch_id or state.get("id")
     if not batch_id:
-        raise RuntimeError("No QA batch id available. Run run-qa-batch first or pass --batch-id.")
+        raise RuntimeError(latest_batch_error_message(qa=True))
     data = get_openai_json(api_key, f"https://api.openai.com/v1/batches/{batch_id}")
     save_json(state_path, data)
     print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -3481,7 +3835,7 @@ def cmd_qa_batch_download_output(args: argparse.Namespace) -> None:
     state_path, state = load_batch_state(project_dir, args.batch_id, qa=True)
     batch_id = args.batch_id or state.get("id")
     if not batch_id:
-        raise RuntimeError("No QA batch id available. Run run-qa-batch first or pass --batch-id.")
+        raise RuntimeError(latest_batch_error_message(qa=True))
     if not state or state.get("id") != batch_id or not state.get("output_file_id"):
         state = get_openai_json(api_key, f"https://api.openai.com/v1/batches/{batch_id}")
         save_json(state_path, state)
@@ -3508,9 +3862,12 @@ def cmd_apply_batch_output(args: argparse.Namespace) -> None:
     paths = project_paths(project_dir)
     batch_map = load_json(paths["batch_map"], {"requests": []})
     progress = load_json(paths["progress"], create_progress_stub(Path(config["book"]["source_epub"])))
-    output_path = Path(args.batch_output) if args.batch_output else paths["batch_output"]
+    output_path = resolve_existing_cli_path(project_dir, args.batch_output, "Batch output file") if args.batch_output else paths["batch_output"]
     if not output_path.exists():
-        raise RuntimeError(f"Batch output file not found: {output_path}")
+        raise RuntimeError(
+            f"Batch output file not found: {output_path}. "
+            "Run batch-download-output first or pass --batch-output with an absolute or repo-relative path."
+        )
     outputs = {}
     for line in output_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -3622,9 +3979,12 @@ def cmd_apply_qa_output(args: argparse.Namespace) -> None:
     project_dir = infer_project_dir(args.project, None, Path(args.project_root))
     paths = project_paths(project_dir)
     batch_map = load_json(paths["qa_batch_map"], {"requests": []})
-    output_path = Path(args.batch_output) if args.batch_output else paths["qa_batch_output"]
+    output_path = resolve_existing_cli_path(project_dir, args.batch_output, "QA batch output file") if args.batch_output else paths["qa_batch_output"]
     if not output_path.exists():
-        raise RuntimeError(f"QA batch output file not found: {output_path}")
+        raise RuntimeError(
+            f"QA batch output file not found: {output_path}. "
+            "Run qa-batch-download-output first or pass --batch-output with an absolute or repo-relative path."
+        )
 
     outputs = {}
     for line in output_path.read_text(encoding="utf-8").splitlines():
@@ -3783,6 +4143,17 @@ def build_parser() -> argparse.ArgumentParser:
     finalize_parser.add_argument("--project", required=True)
     finalize_parser.add_argument("--project-root", default="projects")
     finalize_parser.set_defaults(func=cmd_finalize)
+
+    repair_parser = subparsers.add_parser("repair-chunk", help="Inspect, patch, or retry a single translated chunk.")
+    repair_parser.add_argument("--project", required=True)
+    repair_parser.add_argument("--project-root", default="projects")
+    repair_parser.add_argument("--href", required=True, help="Chapter/content href, for example OEBPS/chapter01.xhtml or index_split_003.html.")
+    repair_parser.add_argument("--chunk-index", required=True, type=int)
+    repair_parser.add_argument("--mode", required=True, choices=["show", "apply", "retry-single"])
+    repair_parser.add_argument("--max-chars", type=int)
+    repair_parser.add_argument("--set", dest="set", action="append", help="Apply mode: <unit_index>=<replacement text>.")
+    repair_parser.add_argument("--set-file", dest="set_file", action="append", help="Apply mode: <unit_index>=<path to UTF-8 text file>.")
+    repair_parser.set_defaults(func=cmd_repair_chunk)
 
     estimate_parser = subparsers.add_parser("estimate-cost", help="Estimate translation cost for a configured project.")
     estimate_parser.add_argument("--project", required=True)
@@ -3943,6 +4314,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    configure_stdio()
     parser = build_parser()
     args = parser.parse_args()
     args.func(args)
