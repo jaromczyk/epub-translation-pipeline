@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import math
 import os
@@ -196,6 +197,27 @@ def unique_path(path: Path) -> Path:
         counter += 1
 
 
+def utc_now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def file_sha256(path: Path) -> Optional[str]:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
@@ -230,6 +252,8 @@ def project_paths(project_dir: Path, target_language: Optional[str] = None) -> D
         "qa": project_dir / "QA.md",
         "qa_cloud": project_dir / "QA_cloud.md",
         "qa_cloud_history": project_dir / "QA_cloud_history",
+        "iterations_dir": project_dir / "iterations",
+        "iteration_log": project_dir / "iterations" / "history.jsonl",
         "progress": workspace / "progress.json",
         "batch_requests": project_dir / "batches" / "requests.jsonl",
         "batch_map": project_dir / "batches" / "requests_map.json",
@@ -700,6 +724,59 @@ def write_glossary_suggestions(
             files = item["files"].replace("|", "\\|")
             lines.append(f"| {source} |  | {item['count']} | {reason} | {files} |")
     suggestions_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def latest_qa_history_snapshot(qa_history_dir: Path) -> Optional[Path]:
+    if not qa_history_dir.exists():
+        return None
+    files = [path for path in qa_history_dir.glob("*.md") if path.is_file()]
+    if not files:
+        return None
+    return max(files, key=lambda path: path.stat().st_mtime)
+
+
+def qa_snapshot_metadata(paths: Dict[str, Path]) -> Dict[str, Optional[str]]:
+    qa_cloud_path = paths["qa_cloud"]
+    latest_history = latest_qa_history_snapshot(paths["qa_cloud_history"])
+    current_text = qa_cloud_path.read_text(encoding="utf-8") if qa_cloud_path.exists() else ""
+    finding_headers = re.findall(r"^###\s+.+?\s+chunk\s+\d+$", current_text, flags=re.MULTILINE)
+    return {
+        "qa_cloud_path": str(qa_cloud_path),
+        "qa_cloud_sha256": sha256_text(current_text) if current_text else None,
+        "qa_cloud_updated_at": dt.datetime.fromtimestamp(qa_cloud_path.stat().st_mtime, tz=dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z") if qa_cloud_path.exists() else None,
+        "qa_cloud_chunks_with_findings": len(finding_headers) if current_text else 0,
+        "latest_history_snapshot": str(latest_history) if latest_history else None,
+        "latest_history_sha256": file_sha256(latest_history) if latest_history else None,
+    }
+
+
+def append_iteration_event(project_dir: Path, event_type: str, payload: Dict) -> Dict:
+    paths = project_paths(project_dir)
+    ensure_dir(paths["iterations_dir"])
+    event = {
+        "timestamp": utc_now_iso(),
+        "event": event_type,
+        "project": project_dir.name,
+        "payload": payload,
+    }
+    with paths["iteration_log"].open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    return event
+
+
+def load_iteration_events(project_dir: Path) -> List[Dict]:
+    log_path = project_paths(project_dir)["iteration_log"]
+    if not log_path.exists():
+        return []
+    events: List[Dict] = []
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
 
 
 def load_qa_feedback(qa_cloud_path: Path) -> Dict[str, Dict[int, Dict]]:
@@ -1450,6 +1527,14 @@ def cmd_suggest_glossary(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_iteration_status(args: argparse.Namespace) -> None:
+    project_dir = infer_project_dir(args.project, None, Path(args.project_root))
+    events = load_iteration_events(project_dir)
+    limit = max(args.limit, 1)
+    selected = events[-limit:]
+    print(json.dumps({"project": project_dir.name, "events": selected}, ensure_ascii=False, indent=2))
+
+
 def cmd_prepare_batch(args: argparse.Namespace) -> None:
     project_dir = infer_project_dir(args.project, None, Path(args.project_root))
     config = read_project_config(project_dir)
@@ -1664,6 +1749,22 @@ def cmd_run_batch(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Batch submission failed: {exc}") from exc
     state_path = project_dir / "batches" / "last_batch.json"
     save_json(state_path, data)
+    append_iteration_event(
+        project_dir,
+        "translation_batch_submitted",
+        {
+            "batch_id": data.get("id"),
+            "status": data.get("status"),
+            "input_file_id": input_file_id,
+            "requests": len(requests),
+            "retry_only_high": retry_only_high,
+            "qa_retry_chunks": qa_retry_chunks,
+            "strong_formatting_retries": strong_formatting_retries,
+            "batch_requests_path": str(paths["batch_requests"]),
+            "batch_map_path": str(paths["batch_map"]),
+            "qa_snapshot": qa_snapshot_metadata(paths),
+        },
+    )
     print(
         json.dumps(
             {
@@ -1719,6 +1820,18 @@ def cmd_run_qa_batch(args: argparse.Namespace) -> None:
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Batch submission failed: {exc}") from exc
     save_json(paths["qa_last_batch"], data)
+    append_iteration_event(
+        project_dir,
+        "qa_batch_submitted",
+        {
+            "batch_id": data.get("id"),
+            "status": data.get("status"),
+            "input_file_id": input_file_id,
+            "requests": len(requests),
+            "qa_batch_requests_path": str(paths["qa_batch_requests"]),
+            "qa_batch_map_path": str(paths["qa_batch_map"]),
+        },
+    )
     print(
         json.dumps(
             {
@@ -1936,6 +2049,22 @@ def cmd_submit_batch(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Batch submission failed: {exc}") from exc
     state_path = project_dir / "batches" / "last_batch.json"
     save_json(state_path, data)
+    append_iteration_event(
+        project_dir,
+        "translation_batch_submitted",
+        {
+            "batch_id": data.get("id"),
+            "status": data.get("status"),
+            "input_file_id": input_file_id,
+            "requests": None,
+            "retry_only_high": None,
+            "qa_retry_chunks": None,
+            "strong_formatting_retries": None,
+            "batch_requests_path": str(paths["batch_requests"]),
+            "batch_map_path": str(paths["batch_map"]),
+            "qa_snapshot": qa_snapshot_metadata(paths),
+        },
+    )
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
@@ -2094,6 +2223,20 @@ def cmd_apply_batch_output(args: argparse.Namespace) -> None:
         run_qa = False
     if run_qa:
         generate_qa_report(changed_files, load_glossary(paths["glossary"]), paths["qa"])
+    batch_state = load_json(project_dir / "batches" / "last_batch.json", {})
+    append_iteration_event(
+        project_dir,
+        "translation_batch_applied",
+        {
+            "batch_id": batch_state.get("id"),
+            "output_file_id": batch_state.get("output_file_id"),
+            "updated_files": len(changed_files),
+            "output_epub": str(paths["output_epub"]),
+            "batch_output_path": str(output_path),
+            "qa_ran": run_qa,
+            "progress_sha256": file_sha256(paths["progress"]),
+        },
+    )
     print(
         json.dumps(
             {
@@ -2181,6 +2324,21 @@ def cmd_apply_qa_output(args: argparse.Namespace) -> None:
     history_filename = build_qa_history_filename(batch_map.get("requests", []))
     history_path = unique_path(paths["qa_cloud_history"] / history_filename)
     history_path.write_text(report_text, encoding="utf-8")
+    qa_batch_state = load_json(paths["qa_last_batch"], {})
+    append_iteration_event(
+        project_dir,
+        "qa_batch_applied",
+        {
+            "batch_id": qa_batch_state.get("id"),
+            "output_file_id": qa_batch_state.get("output_file_id"),
+            "checked_chunks": checked_chunks,
+            "findings": finding_count,
+            "failed_chunks": failed_chunks,
+            "qa_report": str(paths["qa_cloud"]),
+            "qa_history_snapshot": str(history_path),
+            "qa_snapshot": qa_snapshot_metadata(paths),
+        },
+    )
     print(
         json.dumps(
             {
@@ -2230,6 +2388,12 @@ def build_parser() -> argparse.ArgumentParser:
     estimate_parser.add_argument("--project-root", default="projects")
     estimate_parser.add_argument("--model")
     estimate_parser.set_defaults(func=cmd_estimate_cost)
+
+    iteration_parser = subparsers.add_parser("iteration-status", help="Show recent QA/retry/apply iteration events for a project.")
+    iteration_parser.add_argument("--project", required=True)
+    iteration_parser.add_argument("--project-root", default="projects")
+    iteration_parser.add_argument("--limit", type=int, default=10)
+    iteration_parser.set_defaults(func=cmd_iteration_status)
 
     glossary_parser = subparsers.add_parser("suggest-glossary", help="Extract glossary candidates from the source EPUB into a per-project suggestions file.")
     glossary_parser.add_argument("--project", required=True)

@@ -159,6 +159,23 @@ Ten tryb nadal tłumaczy z oryginalnego EPUB źródłowego. `QA_cloud.md` dział
 python tools\epub_translate.py batch-status --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects
 ```
 
+### Historia iteracji QA i retry
+
+```cmd
+python tools\epub_translate.py iteration-status --project qu-est-ce-que-le-fascisme-maurice-bardeche-pl --project-root projects --limit 10
+```
+
+Skrypt zapisuje historię do:
+
+- `projects/<projekt>/iterations/history.jsonl`
+
+Log obejmuje m.in.:
+
+- wysłanie batcha QA
+- złożenie `QA_cloud.md`
+- wysłanie batcha retranslacji z feedbackiem
+- zastosowanie wyników retranslacji do EPUB
+
 Statusy typowe:
 
 - `validating`
