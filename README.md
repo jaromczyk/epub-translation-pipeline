@@ -4,10 +4,14 @@
 
 The repository is intentionally small. It contains the tool, prompt templates, tests, and docs. Generated book projects, source EPUBs, batch outputs, and local assets stay out of version control.
 
+Current public release: `v0.1.0`
+
+- changelog: [`CHANGELOG.md`](CHANGELOG.md)
+
 ## Highlights
 
 - source-language aware project config
-- external prompt templates in [`prompts/`](/c:/code/bardeche/prompts)
+- external prompt templates in [`prompts/`](prompts/)
 - resumable draft translation via direct mode or Batch API
 - local validation, remediation manifests, and targeted retry flow
 - explicit `finalize` command to rebuild the output EPUB
@@ -54,13 +58,13 @@ python tools\epub_translate.py finalize --project my-book-en --project-root proj
 
 ## Repository Layout
 
-- [`tools/epub_translate.py`](/c:/code/bardeche/tools/epub_translate.py)
-- [`prompts/translation_system.txt`](/c:/code/bardeche/prompts/translation_system.txt)
-- [`prompts/translation_user.txt`](/c:/code/bardeche/prompts/translation_user.txt)
-- [`prompts/qa_system.txt`](/c:/code/bardeche/prompts/qa_system.txt)
-- [`prompts/qa_user.txt`](/c:/code/bardeche/prompts/qa_user.txt)
-- [`MANUAL.md`](/c:/code/bardeche/MANUAL.md)
-- [`tests/test_epub_translate.py`](/c:/code/bardeche/tests/test_epub_translate.py)
+- [`tools/epub_translate.py`](tools/epub_translate.py)
+- [`prompts/translation_system.txt`](prompts/translation_system.txt)
+- [`prompts/translation_user.txt`](prompts/translation_user.txt)
+- [`prompts/qa_system.txt`](prompts/qa_system.txt)
+- [`prompts/qa_user.txt`](prompts/qa_user.txt)
+- [`MANUAL.md`](MANUAL.md)
+- [`tests/test_epub_translate.py`](tests/test_epub_translate.py)
 
 ## Requirements
 
